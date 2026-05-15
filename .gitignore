@@ -1,0 +1,8 @@
+Alpaca.env
+.env
+__pycache__/
+*.pyc
+data/cache/
+logs/
+results/
+.DS_Store

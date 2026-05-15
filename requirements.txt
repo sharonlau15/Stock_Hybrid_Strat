@@ -1,0 +1,15 @@
+alpaca-py
+pandas
+numpy
+scipy
+scikit-learn
+lightgbm
+loguru
+python-dotenv
+apscheduler
+tqdm
+pyarrow
+# ── Dashboard ──────────────────────────────────────────────────────────────────
+dash>=2.14
+dash-bootstrap-components>=1.5
+plotly>=5.18
