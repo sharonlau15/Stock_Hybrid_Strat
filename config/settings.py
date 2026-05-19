@@ -24,7 +24,7 @@ for _env_path in [ROOT_DIR / "Alpaca.env", ROOT_DIR / ".env"]:
         load_dotenv(_env_path)
         break
 
-DB_URL           = os.getenv("DB_URL", "postgresql://***REDACTED***")
+DB_URL           = os.getenv("DB_URL")  # Set in .env or environment — never hardcode credentials
 
 PAPER_API_KEY    = os.getenv("ALPACA_PAPER_API_KEY")
 PAPER_API_SECRET = os.getenv("ALPACA_PAPER_API_SECRET")
