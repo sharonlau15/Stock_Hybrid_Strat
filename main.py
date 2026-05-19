@@ -53,11 +53,16 @@ from config.settings import RESULT_DIR, PAPER_TRADING, PORTFOLIO_TYPE, PORTFOLIO
 from config.client import check_connectivity
 from data.ingestion import get_universe_ohlcv, build_close_matrix, build_return_matrix
 from strategies import get_all_strategies
-from backtest.engine import run_all_backtests, run_portfolio_comparison
+from backtest.engine import (
+    run_all_backtests, run_portfolio_comparison, run_all_backtests_with_splits,
+)
 from portfolio import get_portfolio, get_all_portfolios
 from execution.live_engine import start_scheduler
 from utils.logger import setup_logger
-from utils.reporting import print_summary_table, save_results
+from utils.reporting import (
+    print_summary_table, save_results,
+    print_split_summary, save_split_results,
+)
 
 
 # ── Portfolio comparison printer ───────────────────────────────────────────────
@@ -123,15 +128,23 @@ def print_portfolio_comparison(results: dict[str, dict]) -> None:
 
 # ── Backtest pipeline ──────────────────────────────────────────────────────────
 
-def run_backtest_pipeline(use_cache: bool = True, portfolio_name: str = None) -> dict:
+def run_backtest_pipeline(
+    use_cache:      bool = True,
+    portfolio_name: str  = None,
+    run_split:      bool = False,
+    train_frac:     float = 0.70,
+    val_frac:       float = 0.15,
+) -> dict:
     """
     Full offline backtest pipeline.
 
     Parameters
     ----------
-    portfolio_name : str or None
-        Name of portfolio to use, or "all" to compare every portfolio type.
-        Falls back to PORTFOLIO_TYPE from settings.py when None.
+    portfolio_name : "all" compares every portfolio type; None uses PORTFOLIO_TYPE.
+    run_split      : when True, splits returns into Train/Val/Test and reports
+                     each period separately (70 / 15 / 15 by default).
+    train_frac     : fraction of bars in the training period.
+    val_frac       : fraction of bars in the validation period.
 
     Returns artifacts dict for the live engine.
     """
@@ -148,8 +161,9 @@ def run_backtest_pipeline(use_cache: bool = True, portfolio_name: str = None) ->
     universe_data = get_universe_ohlcv(use_cache=use_cache)
     close         = build_close_matrix(universe_data)
     returns       = build_return_matrix(close)
-    high_df       = pd.DataFrame({s: universe_data[s]["high"] for s in universe_data})
-    low_df        = pd.DataFrame({s: universe_data[s]["low"]  for s in universe_data})
+    high_df       = pd.DataFrame({s: universe_data[s]["high"]   for s in universe_data})
+    low_df        = pd.DataFrame({s: universe_data[s]["low"]    for s in universe_data})
+    volume_df     = pd.DataFrame({s: universe_data[s]["volume"] for s in universe_data})
 
     logger.info(f"Universe: {list(universe_data.keys())}")
     logger.info(f"Date range: {close.index[0].date()} → {close.index[-1].date()}")
@@ -167,6 +181,7 @@ def run_backtest_pipeline(use_cache: bool = True, portfolio_name: str = None) ->
             returns = returns,
             high    = high_df,
             low     = low_df,
+            volume  = volume_df,
         )
 
     # ── 3. Backtest ────────────────────────────────────────────────────────────
@@ -192,18 +207,42 @@ def run_backtest_pipeline(use_cache: bool = True, portfolio_name: str = None) ->
         }
     else:
         logger.info(f"Portfolio mode: {portfolio_name}")
-        portfolio        = get_portfolio(portfolio_name, params=PORTFOLIO_PARAMS.get(portfolio_name))
-        backtest_results = run_all_backtests(
-            strategies   = strategies,
-            signals_dict = signals_dict,
-            close        = close,
-            returns      = returns,
-            optimizer    = portfolio,
-        )
+        portfolio = get_portfolio(portfolio_name, params=PORTFOLIO_PARAMS.get(portfolio_name))
         logger.info("Step 4/4: Saving results")
-        metrics_summary = {name: result.metrics for name, result in backtest_results.items()}
-        print_summary_table(metrics_summary)
-        save_results(backtest_results)
+
+        if run_split:
+            logger.info(
+                f"Split mode: Train {train_frac*100:.0f}% / "
+                f"Val {val_frac*100:.0f}% / "
+                f"Test {(1-train_frac-val_frac)*100:.0f}%"
+            )
+            split_results = run_all_backtests_with_splits(
+                strategies   = strategies,
+                signals_dict = signals_dict,
+                close        = close,
+                returns      = returns,
+                optimizer    = portfolio,
+                train_frac   = train_frac,
+                val_frac     = val_frac,
+            )
+            print_split_summary(split_results)
+            save_split_results(split_results)
+            # Expose full-period results for the live engine
+            backtest_results = {
+                name: sr.train  # train result carries the full-period weights
+                for name, sr in split_results.items()
+            }
+        else:
+            backtest_results = run_all_backtests(
+                strategies   = strategies,
+                signals_dict = signals_dict,
+                close        = close,
+                returns      = returns,
+                optimizer    = portfolio,
+            )
+            metrics_summary = {name: r.metrics for name, r in backtest_results.items()}
+            print_summary_table(metrics_summary)
+            save_results(backtest_results)
 
     return {
         "universe_data":    universe_data,
@@ -240,6 +279,9 @@ def main():
     )
     parser.add_argument("--no-cache",  action="store_true", help="Force re-download of data")
     parser.add_argument("--run-now",   action="store_true", help="Fire one rebalance immediately on startup")
+    parser.add_argument("--split",     action="store_true", help="Split returns into Train/Val/Test (70/15/15) and report each period")
+    parser.add_argument("--train-frac", type=float, default=0.70, help="Training period fraction (default 0.70)")
+    parser.add_argument("--val-frac",   type=float, default=0.15, help="Validation period fraction (default 0.15)")
     args = parser.parse_args()
 
     mode = "PAPER" if PAPER_TRADING else "LIVE ⚠️  (real money)"
@@ -252,6 +294,9 @@ def main():
             run_backtest_pipeline(
                 use_cache      = not args.no_cache,
                 portfolio_name = args.portfolio,
+                run_split      = args.split,
+                train_frac     = args.train_frac,
+                val_frac       = args.val_frac,
             )
 
         elif args.mode == "live":

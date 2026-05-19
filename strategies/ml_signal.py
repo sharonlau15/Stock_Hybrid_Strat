@@ -46,11 +46,11 @@ class MLSignalStrategy(BaseStrategy):
             for i in range(tw, len(ret)):
                 # Retrain whenever the model is stale or missing.
                 # Training window is strictly [i-tw, i-1] — no future data.
+                # target[j] = sign(ret[j+1]).  The last row in the window is
+                # j = i-1, whose label is sign(ret[i]) = today's known return.
+                # That is valid; future bars (j >= i) are never included.
                 if model is None or (i - last_trained_i) >= retrain_every:
                     X_tr = feats.iloc[i - tw: i].dropna()
-                    # Drop the last label row: target[i-1] = ret[i] which IS
-                    # known at i, but we want the model to generalise, not fit
-                    # on it directly. Drop rows where target is NaN (last bar).
                     y_tr = target.iloc[i - tw: i].loc[X_tr.index].dropna()
                     X_tr = X_tr.loc[y_tr.index]
 

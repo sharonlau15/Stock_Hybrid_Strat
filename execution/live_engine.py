@@ -40,11 +40,15 @@ from config.settings import (
 )
 from data.ingestion import get_universe_ohlcv, build_close_matrix, build_return_matrix
 from utils.logger import setup_logger
+from db.state import (
+    load_state,
+    save_state,
+    load_nav_history_for_report,
+    load_trade_log_for_report,
+)
 
 from alpaca.trading.requests import MarketOrderRequest, GetAssetsRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
-
-STATE_FILE = RESULT_DIR / "live_state.json"
 
 
 # ── Market hours ───────────────────────────────────────────────────────────────
@@ -60,29 +64,6 @@ def market_is_open() -> bool:
 
 
 # ── State management ───────────────────────────────────────────────────────────
-def load_state() -> dict:
-    if STATE_FILE.exists():
-        with open(STATE_FILE) as f:
-            return json.load(f)
-    return {
-        "positions":        {sym: 0.0 for sym in UNIVERSE},
-        "cash_usd":         PORTFOLIO_USD,
-        "last_run":         None,
-        "nav_history":      [],
-        "current_weights":  {},
-        "position_entries": {},
-        "trade_log":        [],
-        "active_strategy":  None,
-    }
-
-
-def save_state(state: dict):
-    tmp = STATE_FILE.with_suffix(".tmp")
-    with open(tmp, "w") as f:
-        json.dump(state, f, indent=2, default=str)
-    tmp.replace(STATE_FILE)
-
-
 # ── Portfolio NAV ──────────────────────────────────────────────────────────────
 def compute_nav(state: dict, current_prices: dict) -> float:
     nav = state["cash_usd"]
@@ -477,16 +458,12 @@ def start_scheduler(strategies: list, signals_dict: dict, run_now: bool = False)
 
 def _final_report():
     try:
-        if not STATE_FILE.exists():
-            return
-        with open(STATE_FILE) as f:
-            state = json.load(f)
-        nav_hist = state.get("nav_history", [])
+        nav_hist = load_nav_history_for_report()
         if nav_hist:
             start = nav_hist[0]["nav"]
             end   = nav_hist[-1]["nav"]
             logger.info(f"Session return: {(end-start)/start*100:+.2f}%  (${start:,.2f} → ${end:,.2f})")
-        trades = pd.DataFrame(state.get("trade_log", []))
+        trades = pd.DataFrame(load_trade_log_for_report())
         if not trades.empty:
             trades.to_csv(RESULT_DIR / "trade_log.csv", index=False)
             logger.success(f"Trade log saved → results/trade_log.csv")

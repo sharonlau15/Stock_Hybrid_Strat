@@ -12,12 +12,13 @@ To add a new strategy
 That's it. Nothing else in the codebase needs to change.
 """
 
-from strategies.momentum        import MomentumStrategy
-from strategies.mean_reversion  import MeanReversionStrategy
-from strategies.risk_parity     import RiskParityStrategy
-from strategies.cross_sectional import CrossSectionalMomentumStrategy
-from strategies.vol_breakout    import VolBreakoutStrategy
-from strategies.ml_signal       import MLSignalStrategy
+from strategies.momentum         import MomentumStrategy
+from strategies.mean_reversion   import MeanReversionStrategy
+from strategies.risk_parity      import RiskParityStrategy
+from strategies.cross_sectional  import CrossSectionalMomentumStrategy
+from strategies.vol_breakout     import VolBreakoutStrategy
+from strategies.ml_signal        import MLSignalStrategy
+from strategies.exhaustion_fade  import ExhaustionFadeStrategy
 
 # ── Registry ───────────────────────────────────────────────────────────────────
 REGISTRY: list[type] = [
@@ -27,6 +28,7 @@ REGISTRY: list[type] = [
     CrossSectionalMomentumStrategy,
     VolBreakoutStrategy,
     MLSignalStrategy,
+    ExhaustionFadeStrategy,
 ]
 
 

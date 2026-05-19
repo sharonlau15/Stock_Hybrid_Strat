@@ -37,6 +37,7 @@ from dashboard.data_loader import (
     load_strategy_metrics, load_strategy_returns,
     load_comparison_metrics, load_comparison_returns,
     load_custom_metrics, load_custom_returns,
+    load_split_metrics, load_split_returns, load_split_summary,
     load_live_state, metrics_to_df, comparison_pivot,
 )
 
@@ -60,6 +61,7 @@ PORTFOLIO_NAMES = [
 STRATEGY_NAMES = [
     "momentum", "mean_reversion", "risk_parity",
     "cross_sectional_momentum", "vol_breakout", "ml_signal",
+    "exhaustion_fade",
 ]
 
 # ── Background job state ───────────────────────────────────────────────────────
@@ -194,6 +196,125 @@ def _metrics_table(df: pd.DataFrame) -> tuple[list, list]:
     return columns, sub.to_dict("records")
 
 
+def _split_metrics_table(metrics: dict) -> tuple[list, list]:
+    """Build period-by-period DataTable from split_metrics dict (strategy/period keys)."""
+    import math
+    strats = sorted({
+        key.rsplit("/", 1)[0] for key in metrics
+        if "/" in key and key.rsplit("/", 1)[1] in ("train", "val", "test")
+    })
+    if not strats:
+        return [], []
+
+    rows = []
+    for strat in strats:
+        def _fmt(period: str, key: str, pct: bool = False) -> str:
+            v = metrics.get(f"{strat}/{period}", {}).get(key, float("nan"))
+            if not isinstance(v, (int, float)) or math.isnan(float(v)):
+                return "–"
+            return f"{float(v)*100:.1f}%" if pct else f"{float(v):.3f}"
+
+        tr_s = float(metrics.get(f"{strat}/train", {}).get("sharpe", float("nan")))
+        va_s = float(metrics.get(f"{strat}/val",   {}).get("sharpe", float("nan")))
+        te_s = float(metrics.get(f"{strat}/test",  {}).get("sharpe", float("nan")))
+        consistent = (
+            not math.isnan(va_s) and not math.isnan(te_s)
+            and va_s > 0 and te_s > 0
+            and abs(tr_s - va_s) < 0.5 and abs(tr_s - te_s) < 0.5
+        )
+        rows.append({
+            "Strategy":     strat,
+            "Train Sharpe": _fmt("train", "sharpe"),
+            "Val Sharpe":   _fmt("val",   "sharpe"),
+            "Test Sharpe":  _fmt("test",  "sharpe"),
+            "Train CAGR":   _fmt("train", "cagr",         pct=True),
+            "Val CAGR":     _fmt("val",   "cagr",         pct=True),
+            "Test CAGR":    _fmt("test",  "cagr",         pct=True),
+            "Train MaxDD":  _fmt("train", "max_drawdown", pct=True),
+            "Val MaxDD":    _fmt("val",   "max_drawdown", pct=True),
+            "Test MaxDD":   _fmt("test",  "max_drawdown", pct=True),
+            "Consistent":   "✓" if consistent else "✗",
+        })
+
+    cols = [{"name": k, "id": k} for k in rows[0].keys()]
+    return cols, rows
+
+
+def _split_cumret_fig(returns: pd.DataFrame, strat_filter: str = None) -> go.Figure:
+    """Cumulative returns with shaded Train / Val / Test regions."""
+    fig = go.Figure()
+    if returns.empty:
+        return _empty_fig("No split results — enable split mode and run backtest")
+
+    strat_names = sorted({
+        col.rsplit("/", 1)[0] for col in returns.columns
+        if "/" in col and col.rsplit("/", 1)[1] in ("train", "val", "test")
+    })
+    show_strats = [strat_filter] if strat_filter and strat_filter in strat_names else strat_names
+    color_map   = {s: COLORS[i % len(COLORS)] for i, s in enumerate(strat_names)}
+
+    # Determine period boundary dates from any available strategy
+    train_end = val_end = series_start = series_end = None
+    for strat in strat_names:
+        for period in ("train", "val", "test"):
+            col = f"{strat}/{period}"
+            if col not in returns.columns:
+                continue
+            r = returns[col].dropna()
+            if r.empty:
+                continue
+            if series_start is None or r.index[0] < series_start:
+                series_start = r.index[0]
+            if series_end is None or r.index[-1] > series_end:
+                series_end = r.index[-1]
+            if period == "train" and train_end is None:
+                train_end = r.index[-1]
+            if period == "val" and val_end is None:
+                val_end = r.index[-1]
+        if train_end and val_end:
+            break
+
+    for strat in show_strats:
+        parts = [
+            returns[f"{strat}/{p}"].dropna()
+            for p in ("train", "val", "test")
+            if f"{strat}/{p}" in returns.columns and not returns[f"{strat}/{p}"].dropna().empty
+        ]
+        if not parts:
+            continue
+        full_r = pd.concat(parts).sort_index()
+        cum    = (1 + full_r).cumprod() - 1
+        fig.add_trace(go.Scatter(
+            x=cum.index, y=(cum * 100).values, mode="lines", name=strat,
+            line=dict(color=color_map[strat], width=1.8),
+        ))
+
+    if series_start and train_end:
+        fig.add_vrect(x0=series_start, x1=train_end,
+                      fillcolor="rgba(30,100,255,0.07)", line_width=0,
+                      annotation_text="Train", annotation_position="top left",
+                      annotation_font=dict(size=10, color="#6699ff"))
+    if train_end and val_end:
+        fig.add_vrect(x0=train_end, x1=val_end,
+                      fillcolor="rgba(255,165,0,0.07)", line_width=0,
+                      annotation_text="Val", annotation_position="top left",
+                      annotation_font=dict(size=10, color="orange"))
+    if val_end and series_end:
+        fig.add_vrect(x0=val_end, x1=series_end,
+                      fillcolor="rgba(0,200,80,0.07)", line_width=0,
+                      annotation_text="Test", annotation_position="top left",
+                      annotation_font=dict(size=10, color="#00cc66"))
+
+    fig.update_layout(
+        template=CHART_TEMPLATE, paper_bgcolor=CHART_BG, plot_bgcolor=CHART_BG,
+        title="Cumulative Returns — Train / Val / Test",
+        yaxis_title="Return (%)", xaxis_title="Date",
+        hovermode="x unified", height=400,
+        legend=dict(orientation="h", y=-0.28, font_size=11),
+    )
+    return fig
+
+
 # ── Tab layouts ────────────────────────────────────────────────────────────────
 
 def _card(children, **kwargs) -> dbc.Card:
@@ -316,6 +437,25 @@ def _backtesting_tab() -> html.Div:
                 ),
 
                 dbc.Row([
+                    dbc.Col(html.Label("Train / Val / Test split", className="small"),
+                            width="auto", className="align-self-center"),
+                    dbc.Col(dbc.Switch(id="bt-run-split", value=True), width="auto"),
+                ], className="mb-2 align-items-center"),
+
+                dbc.Row([
+                    dbc.Col(html.Label("Train %", className="small"), width="auto",
+                            className="align-self-center"),
+                    dbc.Col(dbc.Input(id="bt-train-frac", type="number",
+                                      value=70, min=50, max=85, step=5,
+                                      size="sm"), width=4),
+                    dbc.Col(html.Label("Val %", className="small"), width="auto",
+                            className="align-self-center"),
+                    dbc.Col(dbc.Input(id="bt-val-frac", type="number",
+                                      value=15, min=5, max=25, step=5,
+                                      size="sm"), width=4),
+                ], className="mb-3 align-items-center g-1"),
+
+                dbc.Row([
                     dbc.Col(html.Label("Use cache", className="small"), width="auto",
                             className="align-self-center"),
                     dbc.Col(dbc.Switch(id="bt-use-cache", value=True), width="auto"),
@@ -328,11 +468,25 @@ def _backtesting_tab() -> html.Div:
 
             # ── Results ───────────────────────────────────────────────────────
             dbc.Col([
-                _card(dash_table.DataTable(id="bt-table", sort_action="native",
-                                           page_size=10, **_TABLE_STYLE)),
+                # Period selector (only shown when split results exist)
                 dbc.Row([
-                    dbc.Col(_card(dcc.Graph(id="bt-cumret")), md=6),
+                    dbc.Col(html.Label("View strategy:", className="small text-muted"),
+                            width="auto", className="align-self-center"),
+                    dbc.Col(dcc.Dropdown(id="bt-strat-view", options=[], value=None,
+                                         placeholder="All strategies",
+                                         style={"color": "#000", "fontSize": "12px"})),
+                ], className="mb-2 align-items-center"),
+
+                # Split metrics table
+                _card(dash_table.DataTable(id="bt-split-table", sort_action="native",
+                                           page_size=12, **_TABLE_STYLE)),
+
+                # Cumulative return chart with Train/Val/Test shading
+                _card(dcc.Graph(id="bt-cumret")),
+
+                dbc.Row([
                     dbc.Col(_card(dcc.Graph(id="bt-drawdown")), md=6),
+                    dbc.Col(_card(dcc.Graph(id="bt-rolling-sharpe")), md=6),
                 ]),
             ], md=9),
         ]),
@@ -386,8 +540,9 @@ def _run_custom(strategy_names: list, portfolio_name: str, use_cache: bool = Tru
     universe_data = get_universe_ohlcv(use_cache=use_cache)
     close         = build_close_matrix(universe_data)
     returns       = build_return_matrix(close)
-    high_df       = pd.DataFrame({s: universe_data[s]["high"] for s in universe_data})
-    low_df        = pd.DataFrame({s: universe_data[s]["low"]  for s in universe_data})
+    high_df       = pd.DataFrame({s: universe_data[s]["high"]   for s in universe_data})
+    low_df        = pd.DataFrame({s: universe_data[s]["low"]    for s in universe_data})
+    volume_df     = pd.DataFrame({s: universe_data[s]["volume"] for s in universe_data})
 
     all_strats = get_all_strategies()
     strategies = [s for s in all_strats if s.name in strategy_names]
@@ -397,7 +552,7 @@ def _run_custom(strategy_names: list, portfolio_name: str, use_cache: bool = Tru
     signals_dict = {}
     for strat in strategies:
         signals_dict[strat.name] = strat.run(
-            close=close, returns=returns, high=high_df, low=low_df,
+            close=close, returns=returns, high=high_df, low=low_df, volume=volume_df,
         )
 
     portfolio = get_portfolio(portfolio_name,
@@ -413,6 +568,48 @@ def _run_custom(strategy_names: list, portfolio_name: str, use_cache: bool = Tru
 
     rets_df = pd.DataFrame({name: r.portfolio_returns for name, r in results.items()})
     rets_df.to_csv(RESULT_DIR / "custom_backtest_returns.csv")
+
+
+def _run_custom_split(
+    strategy_names: list, portfolio_name: str,
+    use_cache: bool = True, train_frac: float = 0.70, val_frac: float = 0.15,
+) -> None:
+    """Run split backtest for a subset of strategies and save to split_*.* files."""
+    from utils.logger import setup_logger
+    from data.ingestion import get_universe_ohlcv, build_close_matrix, build_return_matrix
+    from strategies import get_all_strategies
+    from backtest.engine import run_all_backtests_with_splits
+    from portfolio import get_portfolio
+    from config.settings import RESULT_DIR, PORTFOLIO_PARAMS
+    from utils.reporting import save_split_results
+
+    setup_logger()
+
+    universe_data = get_universe_ohlcv(use_cache=use_cache)
+    close         = build_close_matrix(universe_data)
+    returns       = build_return_matrix(close)
+    high_df       = pd.DataFrame({s: universe_data[s]["high"]   for s in universe_data})
+    low_df        = pd.DataFrame({s: universe_data[s]["low"]    for s in universe_data})
+    volume_df     = pd.DataFrame({s: universe_data[s]["volume"] for s in universe_data})
+
+    all_strats = get_all_strategies()
+    strategies = [s for s in all_strats if s.name in strategy_names]
+    if not strategies:
+        raise ValueError(f"No valid strategies in {strategy_names}")
+
+    signals_dict = {}
+    for strat in strategies:
+        signals_dict[strat.name] = strat.run(
+            close=close, returns=returns, high=high_df, low=low_df, volume=volume_df,
+        )
+
+    portfolio = get_portfolio(portfolio_name, params=PORTFOLIO_PARAMS.get(portfolio_name))
+    split_results = run_all_backtests_with_splits(
+        strategies=strategies, signals_dict=signals_dict,
+        close=close, returns=returns, optimizer=portfolio,
+        train_frac=train_frac, val_frac=val_frac,
+    )
+    save_split_results(split_results)
 
 
 # ── Callbacks ─────────────────────────────────────────────────────────────────
@@ -640,46 +837,110 @@ def _trading_cb(n_clicks, n_intervals):
 # ─── Backtesting tab ──────────────────────────────────────────────────────────
 
 @app.callback(
-    Output("bt-cumret",  "figure"),
-    Output("bt-drawdown","figure"),
-    Output("bt-table",   "data"),
-    Output("bt-table",   "columns"),
-    Output("bt-status",  "children"),
-    Input("run-bt-btn",  "n_clicks"),
-    Input("bt-interval", "n_intervals"),
-    State("bt-strat-select","value"),
-    State("bt-port-select", "value"),
-    State("bt-use-cache",   "value"),
+    Output("bt-cumret",        "figure"),
+    Output("bt-drawdown",      "figure"),
+    Output("bt-rolling-sharpe","figure"),
+    Output("bt-split-table",   "data"),
+    Output("bt-split-table",   "columns"),
+    Output("bt-strat-view",    "options"),
+    Output("bt-status",        "children"),
+    Input("run-bt-btn",        "n_clicks"),
+    Input("bt-interval",       "n_intervals"),
+    State("bt-strat-select",   "value"),
+    State("bt-port-select",    "value"),
+    State("bt-use-cache",      "value"),
+    State("bt-run-split",      "value"),
+    State("bt-train-frac",     "value"),
+    State("bt-val-frac",       "value"),
+    State("bt-strat-view",     "value"),
     prevent_initial_call=False,
 )
-def _backtesting_cb(n_clicks, n_intervals, strategies, portfolio, use_cache):
+def _backtesting_cb(
+    n_clicks, n_intervals, strategies, portfolio, use_cache,
+    run_split, train_frac, val_frac, strat_view,
+):
+    run_split  = bool(run_split)
+    train_frac = (train_frac or 70) / 100
+    val_frac   = (val_frac   or 15) / 100
+
     if ctx.triggered_id == "run-bt-btn" and n_clicks:
         strats = strategies or STRATEGY_NAMES
         pname  = portfolio or "max_sharpe"
-        def _t():
-            try:
-                _job_set("bt", "running")
-                _run_custom(strats, pname, use_cache=bool(use_cache))
-                _job_set("bt", "done")
-            except Exception as e:
-                _job_set("bt", "error", str(e))
+        if run_split:
+            tf, vf = train_frac, val_frac
+            def _t():
+                try:
+                    _job_set("bt", "running")
+                    _run_custom_split(strats, pname, use_cache=bool(use_cache),
+                                      train_frac=tf, val_frac=vf)
+                    _job_set("bt", "done")
+                except Exception as e:
+                    _job_set("bt", "error", str(e))
+        else:
+            def _t():
+                try:
+                    _job_set("bt", "running")
+                    _run_custom(strats, pname, use_cache=bool(use_cache))
+                    _job_set("bt", "done")
+                except Exception as e:
+                    _job_set("bt", "error", str(e))
         threading.Thread(target=_t, daemon=True).start()
 
-    badge   = _status_badge("bt")
-    metrics = load_custom_metrics()
-    returns = load_custom_returns()
+    badge = _status_badge("bt")
 
-    df         = metrics_to_df(metrics)
-    cols, data = _metrics_table(df)
+    if run_split:
+        metrics = load_split_metrics()
+        returns = load_split_returns()
 
-    if returns.empty:
-        e = _empty_fig("Configure and click 'Run Backtest' to see results")
-        return e, e, data, cols, badge
+        if not metrics or returns.empty:
+            e = _empty_fig("Enable split mode and click 'Run Backtest'")
+            return e, e, e, [], [], [], badge
 
-    cumret = _cumret_fig(returns, "Custom Backtest — Cumulative Returns")
-    dd     = _drawdown_fig(returns, "Custom Backtest — Drawdown")
+        strat_names = sorted({
+            key.rsplit("/", 1)[0] for key in metrics
+            if "/" in key and key.rsplit("/", 1)[1] in ("train", "val", "test")
+        })
+        strat_opts = [{"label": s, "value": s} for s in strat_names]
 
-    return cumret, dd, data, cols, badge
+        cumret  = _split_cumret_fig(returns, strat_filter=strat_view)
+
+        show = [strat_view] if strat_view and strat_view in strat_names else strat_names
+        combined = pd.DataFrame()
+        for strat in show:
+            parts = [
+                returns[f"{strat}/{p}"].dropna()
+                for p in ("train", "val", "test")
+                if f"{strat}/{p}" in returns.columns
+            ]
+            if parts:
+                combined[strat] = pd.concat(parts).sort_index()
+
+        dd      = _drawdown_fig(combined, "Drawdown") if not combined.empty else _empty_fig()
+        rolling = _rolling_sharpe_fig(combined, 63)   if not combined.empty else _empty_fig()
+        cols, data = _split_metrics_table(metrics)
+        return cumret, dd, rolling, data, cols, strat_opts, badge
+
+    else:
+        metrics = load_custom_metrics()
+        returns = load_custom_returns()
+        df      = metrics_to_df(metrics)
+
+        strat_opts = (
+            [{"label": row["label"], "value": row["label"]} for _, row in df.iterrows()]
+            if not df.empty else []
+        )
+        t_cols, t_data = _metrics_table(df)
+
+        if returns.empty:
+            e = _empty_fig("Configure and click 'Run Backtest' to see results")
+            return e, e, e, t_data, t_cols, strat_opts, badge
+
+        sub     = returns[[strat_view]] if strat_view and strat_view in returns.columns else returns
+        cumret  = _cumret_fig(sub,  "Custom Backtest — Cumulative Returns")
+        dd      = _drawdown_fig(sub, "Custom Backtest — Drawdown")
+        rolling = _rolling_sharpe_fig(sub, 63)
+
+        return cumret, dd, rolling, t_data, t_cols, strat_opts, badge
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

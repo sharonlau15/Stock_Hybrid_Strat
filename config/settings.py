@@ -24,6 +24,8 @@ for _env_path in [ROOT_DIR / "Alpaca.env", ROOT_DIR / ".env"]:
         load_dotenv(_env_path)
         break
 
+DB_URL           = os.getenv("DB_URL", "postgresql://***REDACTED***")
+
 PAPER_API_KEY    = os.getenv("ALPACA_PAPER_API_KEY")
 PAPER_API_SECRET = os.getenv("ALPACA_PAPER_API_SECRET")
 LIVE_API_KEY     = os.getenv("ALPACA_LIVE_API_KEY")
@@ -114,6 +116,17 @@ STRATEGY_PARAMS = {
         "n_estimators":      100,
         "max_depth":         4,
         "learning_rate":     0.05,
+    },
+    "exhaustion_fade": {
+        "bb_window":      20,    # Bollinger Band lookback
+        "bb_std":          2.0,  # 2.0σ (tighter than crypto 2.5σ — stocks less volatile)
+        "adx_period":     14,    # Wilder ADX smoothing period
+        "adx_threshold":  30,    # ADX < 30 = ranging regime (same as crypto)
+        "rsi_period":     14,    # RSI lookback (replaces crypto funding rate)
+        "rsi_ob":         70,    # Overbought threshold → fade short
+        "rsi_os":         30,    # Oversold threshold  → fade long
+        "vol_multiple":    1.5,  # Volume must exceed 1.5× rolling avg
+        "vol_lookback":   20,    # Rolling avg window for volume climax gate
     },
 }
 

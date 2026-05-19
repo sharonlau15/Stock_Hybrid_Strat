@@ -39,13 +39,16 @@ def _load_csv(filename: str) -> pd.DataFrame:
     return pd.read_csv(f, index_col=0, parse_dates=True)
 
 
-def load_strategy_metrics()     -> dict:        return _load_json("strategy_metrics.json")
+def load_strategy_metrics()     -> dict:         return _load_json("strategy_metrics.json")
 def load_strategy_returns()     -> pd.DataFrame: return _load_csv("portfolio_returns.csv")
-def load_comparison_metrics()   -> dict:        return _load_json("portfolio_comparison_metrics.json")
+def load_comparison_metrics()   -> dict:         return _load_json("portfolio_comparison_metrics.json")
 def load_comparison_returns()   -> pd.DataFrame: return _load_csv("portfolio_comparison_returns.csv")
-def load_custom_metrics()       -> dict:        return _load_json("custom_backtest_metrics.json")
+def load_custom_metrics()       -> dict:         return _load_json("custom_backtest_metrics.json")
 def load_custom_returns()       -> pd.DataFrame: return _load_csv("custom_backtest_returns.csv")
-def load_live_state()           -> dict:        return _load_json("live_state.json")
+def load_split_metrics()        -> dict:         return _load_json("split_metrics.json")
+def load_split_returns()        -> pd.DataFrame: return _load_csv("split_returns.csv")
+def load_split_summary()        -> pd.DataFrame: return _load_csv("split_summary.csv")
+def load_live_state()           -> dict:         return _load_json("live_state.json")
 
 
 # ── Parsers ────────────────────────────────────────────────────────────────────

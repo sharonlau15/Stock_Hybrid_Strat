@@ -36,6 +36,17 @@ class BacktestResult:
         self.metrics = compute_metrics(self.portfolio_returns, self.strategy_name)
 
 
+@dataclass
+class SplitBacktestResult:
+    """Three-way chronological split of a single strategy backtest."""
+    strategy_name: str
+    train_end:     pd.Timestamp
+    val_end:       pd.Timestamp
+    train:         BacktestResult
+    val:           BacktestResult
+    test:          BacktestResult
+
+
 def compute_metrics(returns: pd.Series, name: str = "", initial_capital: float = 10_000) -> dict:
     """Standard performance metrics. Annualized over 252 trading days."""
     r = returns.dropna()
@@ -174,6 +185,87 @@ class WalkForwardBacktester:
             signal_history    = self.signals,
         )
 
+    def run_with_splits(
+        self,
+        strategy_name: str   = "unnamed",
+        train_frac:    float  = 0.70,
+        val_frac:      float  = 0.15,
+    ) -> "SplitBacktestResult":
+        """
+        Run the full backtest once, then slice the return series into
+        Train / Validation / Test periods.
+
+        Splitting AFTER the full run is the only correct approach.
+        Splitting BEFORE and re-running each period separately would cause the
+        optimizer to use a shorter covariance history on val/test, changing
+        both weights and returns — invalidating the cross-period comparison.
+        Here, the covariance at any date always uses all returns up to that
+        date, exactly as it would in live trading.
+        """
+        full = self.run(strategy_name)
+        ret  = full.portfolio_returns
+
+        if len(ret) < 60:
+            raise ValueError(
+                f"{strategy_name}: only {len(ret)} observations after warmup — "
+                "need ≥ 60 to split into three periods."
+            )
+
+        train_end, val_end = compute_split_dates(ret.index, train_frac, val_frac)
+
+        def _slice(label: str, mask) -> "BacktestResult":
+            r   = ret.loc[mask]
+            wh  = full.weights_history.reindex(r.index, fill_value=0)
+            sig = full.signal_history.reindex(r.index, fill_value=0)
+            return BacktestResult(
+                strategy_name    = label,
+                portfolio_returns = r,
+                weights_history  = wh,
+                signal_history   = sig,
+            )
+
+        return SplitBacktestResult(
+            strategy_name = strategy_name,
+            train_end     = train_end,
+            val_end       = val_end,
+            train = _slice(f"{strategy_name}/train", ret.index <= train_end),
+            val   = _slice(f"{strategy_name}/val",   (ret.index > train_end) & (ret.index <= val_end)),
+            test  = _slice(f"{strategy_name}/test",   ret.index > val_end),
+        )
+
+
+# ── Train / Validation / Test split helpers ────────────────────────────────────
+
+def compute_split_dates(
+    index:      pd.DatetimeIndex,
+    train_frac: float = 0.70,
+    val_frac:   float = 0.15,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """
+    Compute chronological split boundary dates from a time-series index.
+
+    Splits are always contiguous and non-overlapping:
+        [0, train_end]       — training period   (train_frac of bars)
+        (train_end, val_end] — validation period  (val_frac of bars)
+        (val_end,   end]     — test period        (remaining bars)
+
+    Parameters
+    ----------
+    index      : the portfolio-returns DatetimeIndex (post-warmup)
+    train_frac : fraction of bars assigned to training   (default 0.70)
+    val_frac   : fraction of bars assigned to validation (default 0.15)
+
+    Returns
+    -------
+    (train_end, val_end) — both dates inclusive upper bounds for their period
+    """
+    if train_frac + val_frac >= 1.0:
+        raise ValueError("train_frac + val_frac must be < 1.0")
+    n         = len(index)
+    train_end = index[int(n * train_frac) - 1]
+    val_end   = index[int(n * (train_frac + val_frac)) - 1]
+    return train_end, val_end
+
 
 def run_all_backtests(strategies, signals_dict, close, returns, optimizer) -> dict[str, BacktestResult]:
     results = {}
@@ -240,4 +332,43 @@ def run_portfolio_comparison(
                 f"| CAGR={result.metrics.get('cagr')}"
             )
 
+    return results
+
+
+def run_all_backtests_with_splits(
+    strategies,
+    signals_dict: dict,
+    close,
+    returns,
+    optimizer,
+    train_frac: float = 0.70,
+    val_frac:   float = 0.15,
+) -> dict[str, SplitBacktestResult]:
+    """
+    Run every strategy through run_with_splits and return a dict of
+    SplitBacktestResult keyed by strategy name.
+    """
+    results: dict[str, SplitBacktestResult] = {}
+    for strategy in strategies:
+        name = strategy.name
+        if name not in signals_dict:
+            logger.warning(f"No signals for {name} — skipping")
+            continue
+        bt = WalkForwardBacktester(
+            signals   = signals_dict[name],
+            close     = close,
+            returns   = returns,
+            optimizer = optimizer,
+        )
+        try:
+            sr = bt.run_with_splits(name, train_frac=train_frac, val_frac=val_frac)
+            results[name] = sr
+            logger.success(
+                f"{name}: "
+                f"Train={sr.train.metrics.get('sharpe', 'N/A')} | "
+                f"Val={sr.val.metrics.get('sharpe', 'N/A')} | "
+                f"Test={sr.test.metrics.get('sharpe', 'N/A')} (Sharpe)"
+            )
+        except Exception as e:
+            logger.error(f"Split backtest failed for {name}: {e}")
     return results
