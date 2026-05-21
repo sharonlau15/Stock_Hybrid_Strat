@@ -117,6 +117,19 @@ STRATEGY_PARAMS = {
         "max_depth":         4,
         "learning_rate":     0.05,
     },
+    "macro_regime": {
+        "vix_proxy_window": 20,   # SPY rolling vol window (days)
+        "vix_risk_on":      20,   # annualised vol % < this → risk-on  (+1)
+        "vix_risk_off":     30,   # annualised vol % ≥ this → risk-off (−1)
+        "ma_long":          200,  # SPY trend MA period
+        "breadth_ma":       50,   # breadth MA period
+        "breadth_on":       0.60, # > 60% above MA → risk-on
+        "breadth_off":      0.40, # < 40% above MA → risk-off
+        "vol_short":        10,   # short vol window
+        "vol_long":         30,   # long vol window
+        "mom_long":         252,  # 12-month momentum lookback
+        "mom_skip":         21,   # skip last month
+    },
     "seasonal_exhaustion_fade": {
         "bb_window":        20,    # Bollinger Band lookback
         "bb_std":           2.5,   # 2.5σ bands (wider than vanilla exhaustion_fade)

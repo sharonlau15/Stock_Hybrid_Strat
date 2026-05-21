@@ -63,7 +63,7 @@ PORTFOLIO_NAMES = [
 STRATEGY_NAMES = [
     "momentum", "mean_reversion", "risk_parity",
     "cross_sectional_momentum", "vol_breakout", "ml_signal",
-    "exhaustion_fade", "sma_brownian", "seasonal_exhaustion_fade",
+    "exhaustion_fade", "sma_brownian", "seasonal_exhaustion_fade", "macro_regime",
 ]
 
 # ── Background job state ───────────────────────────────────────────────────────

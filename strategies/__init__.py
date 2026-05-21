@@ -21,6 +21,7 @@ from strategies.ml_signal        import MLSignalStrategy
 from strategies.exhaustion_fade  import ExhaustionFadeStrategy
 from strategies.sma_brownian              import SMABrownianStrategy
 from strategies.seasonal_exhaustion_fade  import SeasonalExhaustionFadeStrategy
+from strategies.macro_regime              import MacroRegimeStrategy
 
 # ── Registry ───────────────────────────────────────────────────────────────────
 REGISTRY: list[type] = [
@@ -33,6 +34,7 @@ REGISTRY: list[type] = [
     ExhaustionFadeStrategy,
     SMABrownianStrategy,
     SeasonalExhaustionFadeStrategy,
+    MacroRegimeStrategy,
 ]
 
 
