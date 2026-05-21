@@ -4,21 +4,29 @@ DB_URL is read from the environment (set in Alpaca.env).
 """
 
 import os
-from psycopg2 import pool as pg_pool
 from loguru import logger
 
-_pool: pg_pool.ThreadedConnectionPool | None = None
+_pool = None
 
 
-def _get_pool() -> pg_pool.ThreadedConnectionPool:
+def _get_pool():
     global _pool
-    if _pool is None or _pool.closed:
-        url = os.environ.get(
-            "DB_URL",
-            "postgresql://***REDACTED***",
+    if _pool is not None and not _pool.closed:
+        return _pool
+
+    try:
+        from psycopg2 import pool as pg_pool
+    except ImportError:
+        raise RuntimeError(
+            "psycopg2 not installed — run: pip install psycopg2-binary"
         )
-        _pool = pg_pool.ThreadedConnectionPool(1, 5, dsn=url)
-        logger.info("PostgreSQL connection pool initialised (stock_hybrid)")
+
+    url = os.environ.get("DB_URL")
+    if not url:
+        raise RuntimeError("DB_URL not set — skipping PostgreSQL")
+
+    _pool = pg_pool.ThreadedConnectionPool(1, 5, dsn=url)
+    logger.info("PostgreSQL connection pool initialised (stock_hybrid)")
     return _pool
 
 

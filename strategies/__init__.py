@@ -19,6 +19,8 @@ from strategies.cross_sectional  import CrossSectionalMomentumStrategy
 from strategies.vol_breakout     import VolBreakoutStrategy
 from strategies.ml_signal        import MLSignalStrategy
 from strategies.exhaustion_fade  import ExhaustionFadeStrategy
+from strategies.sma_brownian              import SMABrownianStrategy
+from strategies.seasonal_exhaustion_fade  import SeasonalExhaustionFadeStrategy
 
 # ── Registry ───────────────────────────────────────────────────────────────────
 REGISTRY: list[type] = [
@@ -29,6 +31,8 @@ REGISTRY: list[type] = [
     VolBreakoutStrategy,
     MLSignalStrategy,
     ExhaustionFadeStrategy,
+    SMABrownianStrategy,
+    SeasonalExhaustionFadeStrategy,
 ]
 
 

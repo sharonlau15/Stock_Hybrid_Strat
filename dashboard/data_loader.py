@@ -48,7 +48,11 @@ def load_custom_returns()       -> pd.DataFrame: return _load_csv("custom_backte
 def load_split_metrics()        -> dict:         return _load_json("split_metrics.json")
 def load_split_returns()        -> pd.DataFrame: return _load_csv("split_returns.csv")
 def load_split_summary()        -> pd.DataFrame: return _load_csv("split_summary.csv")
-def load_live_state()           -> dict:         return _load_json("live_state.json")
+def load_constant_weight_metrics()  -> dict:         return _load_json("constant_weight_strategy_metrics.json")
+def load_constant_weight_returns()  -> pd.DataFrame: return _load_csv("constant_weight_portfolio_returns.csv")
+def load_constant_strategy_metrics()-> dict:         return _load_json("constant_strategy_strategy_metrics.json")
+def load_constant_strategy_returns()-> pd.DataFrame: return _load_csv("constant_strategy_portfolio_returns.csv")
+def load_live_state()               -> dict:         return _load_json("live_state.json")
 
 
 # ── Parsers ────────────────────────────────────────────────────────────────────

@@ -55,6 +55,7 @@ from data.ingestion import get_universe_ohlcv, build_close_matrix, build_return_
 from strategies import get_all_strategies
 from backtest.engine import (
     run_all_backtests, run_portfolio_comparison, run_all_backtests_with_splits,
+    run_constant_weight_backtests, run_constant_strategy_backtests,
 )
 from portfolio import get_portfolio, get_all_portfolios
 from execution.live_engine import start_scheduler
@@ -134,6 +135,7 @@ def run_backtest_pipeline(
     run_split:      bool = False,
     train_frac:     float = 0.70,
     val_frac:       float = 0.15,
+    bt_mode:        str  = "walk_forward",
 ) -> dict:
     """
     Full offline backtest pipeline.
@@ -145,6 +147,10 @@ def run_backtest_pipeline(
                      each period separately (70 / 15 / 15 by default).
     train_frac     : fraction of bars in the training period.
     val_frac       : fraction of bars in the validation period.
+    bt_mode        : "walk_forward"     — standard dynamic rebalancing (default)
+                     "constant_weight"  — weights frozen at first rebalance date
+                     "constant_strategy"— signal frozen at first rebalance date,
+                                         optimizer still adapts to fresh covariance
 
     Returns artifacts dict for the live engine.
     """
@@ -206,7 +212,7 @@ def run_backtest_pipeline(
             for name, port_dict in comparison.items()
         }
     else:
-        logger.info(f"Portfolio mode: {portfolio_name}")
+        logger.info(f"Portfolio mode: {portfolio_name} | Backtest mode: {bt_mode}")
         portfolio = get_portfolio(portfolio_name, params=PORTFOLIO_PARAMS.get(portfolio_name))
         logger.info("Step 4/4: Saving results")
 
@@ -227,12 +233,35 @@ def run_backtest_pipeline(
             )
             print_split_summary(split_results)
             save_split_results(split_results)
-            # Expose full-period results for the live engine
             backtest_results = {
-                name: sr.train  # train result carries the full-period weights
-                for name, sr in split_results.items()
+                name: sr.train for name, sr in split_results.items()
             }
-        else:
+
+        elif bt_mode == "constant_weight":
+            backtest_results = run_constant_weight_backtests(
+                strategies   = strategies,
+                signals_dict = signals_dict,
+                close        = close,
+                returns      = returns,
+                optimizer    = portfolio,
+            )
+            metrics_summary = {name: r.metrics for name, r in backtest_results.items()}
+            print_summary_table(metrics_summary)
+            save_results(backtest_results, prefix="constant_weight")
+
+        elif bt_mode == "constant_strategy":
+            backtest_results = run_constant_strategy_backtests(
+                strategies   = strategies,
+                signals_dict = signals_dict,
+                close        = close,
+                returns      = returns,
+                optimizer    = portfolio,
+            )
+            metrics_summary = {name: r.metrics for name, r in backtest_results.items()}
+            print_summary_table(metrics_summary)
+            save_results(backtest_results, prefix="constant_strategy")
+
+        else:  # walk_forward (default)
             backtest_results = run_all_backtests(
                 strategies   = strategies,
                 signals_dict = signals_dict,
@@ -282,6 +311,17 @@ def main():
     parser.add_argument("--split",     action="store_true", help="Split returns into Train/Val/Test (70/15/15) and report each period")
     parser.add_argument("--train-frac", type=float, default=0.70, help="Training period fraction (default 0.70)")
     parser.add_argument("--val-frac",   type=float, default=0.15, help="Validation period fraction (default 0.15)")
+    parser.add_argument(
+        "--bt-mode",
+        choices=["walk_forward", "constant_weight", "constant_strategy"],
+        default="walk_forward",
+        help=(
+            "Backtesting mode. "
+            "walk_forward: dynamic rebalancing (default). "
+            "constant_weight: weights frozen at first rebalance, no further rebalancing. "
+            "constant_strategy: signal frozen at first rebalance, optimizer still adapts."
+        ),
+    )
     args = parser.parse_args()
 
     mode = "PAPER" if PAPER_TRADING else "LIVE ⚠️  (real money)"
@@ -297,6 +337,7 @@ def main():
                 run_split      = args.split,
                 train_frac     = args.train_frac,
                 val_frac       = args.val_frac,
+                bt_mode        = args.bt_mode,
             )
 
         elif args.mode == "live":

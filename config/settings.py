@@ -117,6 +117,30 @@ STRATEGY_PARAMS = {
         "max_depth":         4,
         "learning_rate":     0.05,
     },
+    "seasonal_exhaustion_fade": {
+        "bb_window":        20,    # Bollinger Band lookback
+        "bb_std":           2.5,   # 2.5σ bands (wider than vanilla exhaustion_fade)
+        "atr_period":       14,    # Wilder ATR period
+        "atr_avg_window":   20,    # Rolling window for average ATR
+        "atr_multiple":     1.5,   # ATR must exceed 1.5× avg ATR to confirm exhaustion
+        "rsi_period":       14,    # RSI lookback
+        "rsi_ob":           70,    # Overbought threshold → fade short
+        "rsi_os":           30,    # Oversold threshold  → fade long
+        "adx_period":       14,    # ADX smoothing period
+        "adx_threshold":    30,    # ADX ≤ 30 = ranging regime (hard gate)
+        "season_threshold": 0.02,  # ±2% monthly return → bullish/bearish regime
+        "jan_discount":     0.30,  # January Effect: reduce score weight 30%
+        "max_positions":    4,     # Maximum simultaneous open positions
+        "time_stop_bars":   12,    # Exit flat after 12 bars if no TP/SL hit
+        "commission_bps":   1.1,   # Per leg (IB benchmark rate)
+        "risk_per_trade":   0.01,  # Risk 1% of portfolio equity per trade
+    },
+    "sma_brownian": {
+        "fast_window":  20,   # fast SMA bars (~1 month)
+        "slow_window":  60,   # slow SMA bars (~1 quarter)
+        "drift_window": 63,   # GBM drift estimation window (~1 quarter)
+        "min_signal":   0.10, # ignore signals weaker than this
+    },
     "exhaustion_fade": {
         "bb_window":      20,    # Bollinger Band lookback
         "bb_std":          2.0,  # 2.0σ (tighter than crypto 2.5σ — stocks less volatile)

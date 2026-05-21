@@ -30,22 +30,32 @@ def print_summary_table(metrics_summary: dict):
     logger.info("\n" + df.to_string())
 
 
-def save_results(backtest_results: dict, output_dir=RESULT_DIR):
-    """Save backtest results to CSV and JSON."""
+def save_results(backtest_results: dict, output_dir=RESULT_DIR, prefix: str = ""):
+    """Save backtest results to CSV and JSON.
+
+    prefix — when non-empty, files are named  {prefix}_metrics.json /
+             {prefix}_returns.csv instead of the default names.
+             Used by constant_weight and constant_strategy modes so they
+             don't overwrite the standard walk-forward results.
+    """
     output_dir = output_dir or RESULT_DIR
+    p = f"{prefix}_" if prefix else ""
+
+    metrics_file = f"{p}strategy_metrics.json" if prefix else "strategy_metrics.json"
+    returns_file  = f"{p}portfolio_returns.csv"  if prefix else "portfolio_returns.csv"
 
     # Strategy metrics JSON
     metrics = {name: r.metrics for name, r in backtest_results.items()}
-    with open(output_dir / "strategy_metrics.json", "w") as f:
+    with open(output_dir / metrics_file, "w") as f:
         json.dump(metrics, f, indent=2, default=str)
-    logger.success("Saved strategy_metrics.json")
+    logger.success(f"Saved {metrics_file}")
 
     # Portfolio returns CSV
     returns_df = pd.DataFrame({
         name: r.portfolio_returns for name, r in backtest_results.items()
     })
-    returns_df.to_csv(output_dir / "portfolio_returns.csv")
-    logger.success("Saved portfolio_returns.csv")
+    returns_df.to_csv(output_dir / returns_file)
+    logger.success(f"Saved {returns_file}")
 
     # P&L summary CSV
     pnl_rows = []
@@ -61,8 +71,9 @@ def save_results(backtest_results: dict, output_dir=RESULT_DIR):
                 "sharpe":        m["sharpe"],
                 "max_drawdown":  m["max_drawdown"],
             })
-    pd.DataFrame(pnl_rows).to_csv(output_dir / "pnl_summary.csv", index=False)
-    logger.success("Saved pnl_summary.csv")
+    pnl_file = f"{p}pnl_summary.csv" if prefix else "pnl_summary.csv"
+    pd.DataFrame(pnl_rows).to_csv(output_dir / pnl_file, index=False)
+    logger.success(f"Saved {pnl_file}")
 
     # Also persist strategy metrics to PostgreSQL
     try:

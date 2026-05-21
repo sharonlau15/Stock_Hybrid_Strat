@@ -38,6 +38,8 @@ from dashboard.data_loader import (
     load_comparison_metrics, load_comparison_returns,
     load_custom_metrics, load_custom_returns,
     load_split_metrics, load_split_returns, load_split_summary,
+    load_constant_weight_metrics, load_constant_weight_returns,
+    load_constant_strategy_metrics, load_constant_strategy_returns,
     load_live_state, metrics_to_df, comparison_pivot,
 )
 
@@ -61,7 +63,7 @@ PORTFOLIO_NAMES = [
 STRATEGY_NAMES = [
     "momentum", "mean_reversion", "risk_parity",
     "cross_sectional_momentum", "vol_breakout", "ml_signal",
-    "exhaustion_fade",
+    "exhaustion_fade", "sma_brownian", "seasonal_exhaustion_fade",
 ]
 
 # ── Background job state ───────────────────────────────────────────────────────
@@ -436,6 +438,19 @@ def _backtesting_tab() -> html.Div:
                     className="mb-3",
                 ),
 
+                html.Label("Backtest Mode", className="small"),
+                dcc.Dropdown(
+                    id="bt-mode",
+                    options=[
+                        {"label": "Walk-Forward (dynamic)",   "value": "walk_forward"},
+                        {"label": "Constant Weights (frozen)", "value": "constant_weight"},
+                        {"label": "Constant Strategy (frozen signal)", "value": "constant_strategy"},
+                    ],
+                    value="walk_forward", clearable=False,
+                    style={"color": "#000", "fontSize": "12px"},
+                    className="mb-3",
+                ),
+
                 dbc.Row([
                     dbc.Col(html.Label("Train / Val / Test split", className="small"),
                             width="auto", className="align-self-center"),
@@ -610,6 +625,47 @@ def _run_custom_split(
         train_frac=train_frac, val_frac=val_frac,
     )
     save_split_results(split_results)
+
+
+def _run_custom_constant(
+    strategy_names: list, portfolio_name: str, mode: str, use_cache: bool = True,
+) -> None:
+    """Run constant_weight or constant_strategy backtest for a subset of strategies."""
+    from utils.logger import setup_logger
+    from data.ingestion import get_universe_ohlcv, build_close_matrix, build_return_matrix
+    from strategies import get_all_strategies
+    from backtest.engine import run_constant_weight_backtests, run_constant_strategy_backtests
+    from portfolio import get_portfolio
+    from config.settings import PORTFOLIO_PARAMS
+    from utils.reporting import save_results
+
+    setup_logger()
+
+    universe_data = get_universe_ohlcv(use_cache=use_cache)
+    close         = build_close_matrix(universe_data)
+    returns       = build_return_matrix(close)
+    high_df       = pd.DataFrame({s: universe_data[s]["high"]   for s in universe_data})
+    low_df        = pd.DataFrame({s: universe_data[s]["low"]    for s in universe_data})
+    volume_df     = pd.DataFrame({s: universe_data[s]["volume"] for s in universe_data})
+
+    all_strats = get_all_strategies()
+    strategies = [s for s in all_strats if s.name in strategy_names]
+    if not strategies:
+        raise ValueError(f"No valid strategies in {strategy_names}")
+
+    signals_dict = {}
+    for strat in strategies:
+        signals_dict[strat.name] = strat.run(
+            close=close, returns=returns, high=high_df, low=low_df, volume=volume_df,
+        )
+
+    portfolio = get_portfolio(portfolio_name, params=PORTFOLIO_PARAMS.get(portfolio_name))
+    runner = run_constant_weight_backtests if mode == "constant_weight" else run_constant_strategy_backtests
+    results = runner(
+        strategies=strategies, signals_dict=signals_dict,
+        close=close, returns=returns, optimizer=portfolio,
+    )
+    save_results(results, prefix=mode)
 
 
 # ── Callbacks ─────────────────────────────────────────────────────────────────
@@ -853,15 +909,17 @@ def _trading_cb(n_clicks, n_intervals):
     State("bt-train-frac",     "value"),
     State("bt-val-frac",       "value"),
     State("bt-strat-view",     "value"),
+    State("bt-mode",           "value"),
     prevent_initial_call=False,
 )
 def _backtesting_cb(
     n_clicks, n_intervals, strategies, portfolio, use_cache,
-    run_split, train_frac, val_frac, strat_view,
+    run_split, train_frac, val_frac, strat_view, bt_mode,
 ):
     run_split  = bool(run_split)
     train_frac = (train_frac or 70) / 100
     val_frac   = (val_frac   or 15) / 100
+    bt_mode    = bt_mode or "walk_forward"
 
     if ctx.triggered_id == "run-bt-btn" and n_clicks:
         strats = strategies or STRATEGY_NAMES
@@ -873,6 +931,22 @@ def _backtesting_cb(
                     _job_set("bt", "running")
                     _run_custom_split(strats, pname, use_cache=bool(use_cache),
                                       train_frac=tf, val_frac=vf)
+                    _job_set("bt", "done")
+                except Exception as e:
+                    _job_set("bt", "error", str(e))
+        elif bt_mode == "constant_weight":
+            def _t():
+                try:
+                    _job_set("bt", "running")
+                    _run_custom_constant(strats, pname, "constant_weight", bool(use_cache))
+                    _job_set("bt", "done")
+                except Exception as e:
+                    _job_set("bt", "error", str(e))
+        elif bt_mode == "constant_strategy":
+            def _t():
+                try:
+                    _job_set("bt", "running")
+                    _run_custom_constant(strats, pname, "constant_strategy", bool(use_cache))
                     _job_set("bt", "done")
                 except Exception as e:
                     _job_set("bt", "error", str(e))
@@ -921,8 +995,15 @@ def _backtesting_cb(
         return cumret, dd, rolling, data, cols, strat_opts, badge
 
     else:
-        metrics = load_custom_metrics()
-        returns = load_custom_returns()
+        if bt_mode == "constant_weight":
+            metrics = load_constant_weight_metrics()
+            returns = load_constant_weight_returns()
+        elif bt_mode == "constant_strategy":
+            metrics = load_constant_strategy_metrics()
+            returns = load_constant_strategy_returns()
+        else:
+            metrics = load_custom_metrics()
+            returns = load_custom_returns()
         df      = metrics_to_df(metrics)
 
         strat_opts = (

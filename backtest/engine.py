@@ -372,3 +372,181 @@ def run_all_backtests_with_splits(
         except Exception as e:
             logger.error(f"Split backtest failed for {name}: {e}")
     return results
+
+
+# ── Constant-weight backtester ─────────────────────────────────────────────────
+
+class ConstantWeightBacktester:
+    """
+    Weights are computed once at the first valid rebalance date and held
+    fixed for the entire backtest period (no further rebalancing).
+
+    Benchmark use-case: does dynamic walk-forward rebalancing add value
+    over a static allocation decided at the start?
+    """
+
+    def __init__(self, signals, close, returns, optimizer, rebal_freq="1D"):
+        self.signals    = signals
+        self.close      = close
+        self.returns    = returns
+        self.optimizer  = optimizer
+        self.rebal_freq = rebal_freq
+
+    def run(self, strategy_name: str = "unnamed") -> BacktestResult:
+        logger.info(f"Backtesting (constant weights): {strategy_name}")
+
+        weights_history = pd.DataFrame(0.0, index=self.close.index, columns=self.close.columns)
+        rebal_dates = (
+            self.close.index[RISK_LOOKBACK_DAYS:]
+            if self.rebal_freq == "1D"
+            else self.close.resample(self.rebal_freq).last().index
+        )
+
+        frozen_weights: pd.Series | None = None
+
+        for dt in rebal_dates:
+            if dt not in self.signals.index:
+                continue
+            if frozen_weights is None:
+                cov_matrix = (
+                    self.returns.loc[:dt]
+                    .iloc[-RISK_LOOKBACK_DAYS:]
+                    .cov() * TRADING_DAYS
+                )
+                try:
+                    w = self.optimizer(
+                        signals    = self.signals.loc[dt],
+                        cov        = cov_matrix,
+                        long_short = LONG_SHORT,
+                    )
+                    frozen_weights = pd.Series(w).reindex(self.close.columns, fill_value=0)
+                    logger.info(f"Weights frozen at {dt.date()}: {frozen_weights[frozen_weights != 0].round(3).to_dict()}")
+                except Exception as e:
+                    logger.warning(f"Optimizer failed on {dt}: {e} — retrying next date")
+                    continue
+            weights_history.loc[dt] = frozen_weights
+
+        weights_history = weights_history.replace(0, np.nan).ffill().fillna(0)
+        fwd_returns  = self.returns.shift(-1)
+        port_returns = (weights_history * fwd_returns).sum(axis=1)
+        port_returns = port_returns.iloc[RISK_LOOKBACK_DAYS:-1]
+        port_returns = apply_transaction_costs(port_returns, weights_history.loc[port_returns.index])
+
+        return BacktestResult(
+            strategy_name    = strategy_name,
+            portfolio_returns = port_returns,
+            weights_history  = weights_history,
+            signal_history   = self.signals,
+        )
+
+
+# ── Constant-strategy backtester ───────────────────────────────────────────────
+
+class ConstantStrategyBacktester:
+    """
+    The strategy signal is frozen at the first valid rebalance date.
+    The portfolio optimizer still re-runs every period with fresh covariance
+    data, but the stock-selection signal never changes.
+
+    Benchmark use-case: does live signal generation add value over locking
+    in the initial strategy view and letting only the optimizer adapt?
+    """
+
+    def __init__(self, signals, close, returns, optimizer, rebal_freq="1D"):
+        self.signals    = signals
+        self.close      = close
+        self.returns    = returns
+        self.optimizer  = optimizer
+        self.rebal_freq = rebal_freq
+
+    def run(self, strategy_name: str = "unnamed") -> BacktestResult:
+        logger.info(f"Backtesting (constant strategy): {strategy_name}")
+
+        weights_history = pd.DataFrame(0.0, index=self.close.index, columns=self.close.columns)
+        rebal_dates = (
+            self.close.index[RISK_LOOKBACK_DAYS:]
+            if self.rebal_freq == "1D"
+            else self.close.resample(self.rebal_freq).last().index
+        )
+
+        current_weights = pd.Series(0.0, index=self.close.columns)
+        frozen_signal: pd.Series | None = None
+
+        for dt in rebal_dates:
+            if dt not in self.signals.index:
+                continue
+            if frozen_signal is None:
+                frozen_signal = self.signals.loc[dt].copy()
+                logger.info(f"Signal frozen at {dt.date()}: {frozen_signal[frozen_signal != 0].round(3).to_dict()}")
+
+            cov_matrix = (
+                self.returns.loc[:dt]
+                .iloc[-RISK_LOOKBACK_DAYS:]
+                .cov() * TRADING_DAYS
+            )
+            try:
+                w = self.optimizer(
+                    signals    = frozen_signal,
+                    cov        = cov_matrix,
+                    long_short = LONG_SHORT,
+                )
+                current_weights = pd.Series(w).reindex(self.close.columns, fill_value=0)
+            except Exception as e:
+                logger.warning(f"Optimizer failed on {dt}: {e} — holding previous weights")
+
+            weights_history.loc[dt] = current_weights
+
+        weights_history = weights_history.replace(0, np.nan).ffill().fillna(0)
+        fwd_returns  = self.returns.shift(-1)
+        port_returns = (weights_history * fwd_returns).sum(axis=1)
+        port_returns = port_returns.iloc[RISK_LOOKBACK_DAYS:-1]
+        port_returns = apply_transaction_costs(port_returns, weights_history.loc[port_returns.index])
+
+        return BacktestResult(
+            strategy_name    = strategy_name,
+            portfolio_returns = port_returns,
+            weights_history  = weights_history,
+            signal_history   = self.signals,
+        )
+
+
+# ── Runner helpers ─────────────────────────────────────────────────────────────
+
+def run_constant_weight_backtests(
+    strategies, signals_dict, close, returns, optimizer,
+) -> dict[str, BacktestResult]:
+    results = {}
+    for strategy in strategies:
+        name = strategy.name
+        if name not in signals_dict:
+            logger.warning(f"No signals for {name} — skipping")
+            continue
+        bt = ConstantWeightBacktester(
+            signals=signals_dict[name], close=close, returns=returns, optimizer=optimizer,
+        )
+        results[name] = bt.run(strategy_name=name)
+        logger.success(
+            f"{name}: Sharpe={results[name].metrics.get('sharpe')} "
+            f"| CAGR={results[name].metrics.get('cagr')}"
+        )
+    return results
+
+
+def run_constant_strategy_backtests(
+    strategies, signals_dict, close, returns, optimizer,
+) -> dict[str, BacktestResult]:
+    results = {}
+    for strategy in strategies:
+        name = strategy.name
+        if name not in signals_dict:
+            logger.warning(f"No signals for {name} — skipping")
+            continue
+        bt = ConstantStrategyBacktester(
+            signals=signals_dict[name], close=close, returns=returns, optimizer=optimizer,
+        )
+        results[name] = bt.run(strategy_name=name)
+        logger.success(
+            f"{name}: Sharpe={results[name].metrics.get('sharpe')} "
+            f"| CAGR={results[name].metrics.get('cagr')}"
+        )
+    return results
