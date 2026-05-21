@@ -23,10 +23,15 @@ Indicators
 
 Composite
 ---------
-Final signal = mean of all five indicators, clipped to [−1, +1].
-Applied uniformly to every ticker: a risk-on reading lifts all boats,
-risk-off deflates all.  Use with signal_weighted portfolio type for
-purest expression.
+Raw composite = mean of all five indicators, clipped to [−1, +1].
+Output signal = (composite + 1) / 2, mapped to [0, 1]:
+  −1 (full risk-off) → 0   (go to cash)
+   0 (neutral)       → 0.5 (half-size position)
+  +1 (full risk-on)  → 1.0 (full position)
+
+Applied uniformly to every ticker so the optimizer sees equal expected
+returns and allocates to the minimum-variance portfolio at the scaled
+size.  Lower-risk modes reduce exposure rather than going to 0%.
 """
 
 import numpy as np
@@ -92,8 +97,9 @@ class MacroRegimeStrategy(BaseStrategy):
         return sig
 
     def _cross_momentum(self, close: pd.DataFrame) -> pd.Series:
-        """Average 12-1 month momentum across universe."""
-        score = close / close.shift(self.mom_long) - close / close.shift(self.mom_skip)
+        """Average 12-1 month momentum across universe (standard formula)."""
+        # Return from 12 months ago to 1 month ago — skips reversal-prone last month
+        score = close.shift(self.mom_skip) / close.shift(self.mom_long) - 1
         avg   = score.mean(axis=1)
         sig   = np.sign(avg).rename("cross_mom")
         return sig
@@ -121,15 +127,28 @@ class MacroRegimeStrategy(BaseStrategy):
             self._cross_momentum(close),
         ]
 
-        composite = pd.concat(components, axis=1).mean(axis=1).clip(-1.0, 1.0)
+        composite = (
+            pd.concat(components, axis=1)
+            .mean(axis=1)
+            .clip(-1.0, 1.0)
+            .reindex(close.index)
+            .fillna(0.0)
+        )
 
-        logger.debug(
-            f"MacroRegimeStrategy: composite range "
-            f"[{composite.min():.2f}, {composite.max():.2f}]"
+        # Map composite [-1, +1] → signal [0, 1] for long-only portfolios.
+        # Full risk-off (−1) → 0 (cash), neutral (0) → 0.5, full risk-on (+1) → 1.
+        # This prevents the optimizer from receiving all-negative μ and allocating 0%
+        # during risk-off periods, which would make the strategy appear to do nothing.
+        scale = (composite + 1.0) / 2.0
+
+        risk_on_frac = (composite > 0).mean()
+        logger.info(
+            f"MacroRegimeStrategy: composite [{composite.min():.2f}, {composite.max():.2f}] "
+            f"| risk-on {risk_on_frac:.0%} of days | scale [{scale.min():.2f}, {scale.max():.2f}]"
         )
 
         signals = pd.DataFrame(
-            np.tile(composite.values[:, None], (1, len(close.columns))),
+            np.tile(scale.values[:, None], (1, len(close.columns))),
             index=close.index,
             columns=close.columns,
         )
