@@ -132,13 +132,13 @@ STRATEGY_PARAMS = {
     },
     "seasonal_exhaustion_fade": {
         "bb_window":        20,    # Bollinger Band lookback
-        "bb_std":           2.5,   # 2.5σ bands (wider than vanilla exhaustion_fade)
+        "bb_std":           2.0,   # 2.0σ (lowered from 2.5 — breach too rare on large caps)
         "atr_period":       14,    # Wilder ATR period
         "atr_avg_window":   20,    # Rolling window for average ATR
-        "atr_multiple":     1.5,   # ATR must exceed 1.5× avg ATR to confirm exhaustion
+        "atr_multiple":     1.2,   # ATR must exceed 1.2× avg ATR (lowered from 1.5)
         "rsi_period":       14,    # RSI lookback
-        "rsi_ob":           70,    # Overbought threshold → fade short
-        "rsi_os":           30,    # Oversold threshold  → fade long
+        "rsi_ob":           65,    # Overbought threshold (loosened from 70)
+        "rsi_os":           35,    # Oversold threshold  (loosened from 30)
         "adx_period":       14,    # ADX smoothing period
         "adx_threshold":    30,    # ADX ≤ 30 = ranging regime (hard gate)
         "season_threshold": 0.02,  # ±2% monthly return → bullish/bearish regime
@@ -150,12 +150,12 @@ STRATEGY_PARAMS = {
     },
     "seasonal_exhaustion_fade_long": {
         "bb_window":        20,    # Bollinger Band lookback
-        "bb_std":           2.5,   # 2.5σ bands
+        "bb_std":           2.0,   # 2.0σ (lowered for signal frequency on large caps)
         "atr_period":       14,    # Wilder ATR period
         "atr_avg_window":   20,    # Rolling window for average ATR
-        "atr_multiple":     1.5,   # ATR must exceed 1.5× avg ATR
+        "atr_multiple":     1.2,   # ATR must exceed 1.2× avg ATR (lowered from 1.5)
         "rsi_period":       14,    # RSI lookback
-        "rsi_os":           35,    # Oversold threshold (wider than 30 for long-only)
+        "rsi_os":           35,    # Oversold threshold
         "adx_period":       14,    # ADX smoothing period
         "adx_threshold":    30,    # ADX ≤ 30 = ranging regime (hard gate)
         "season_threshold": 0.02,  # ±2% monthly return → bullish/bearish regime

@@ -135,8 +135,11 @@ class ExhaustionFadeStrategy(BaseStrategy):
         upper    = ma + band
         lower    = ma - band
 
-        g1_short = (close.shift(1) > upper.shift(1)) & (close <= upper)  # above → inside
-        g1_long  = (close.shift(1) < lower.shift(1)) & (close >= lower)  # below → inside
+        # G1: price is currently outside the band (entry while still exhausted).
+        # Original "was-outside-then-back-inside" required a same-day reversal that
+        # almost never fires on large-cap stocks — produced 0 positive signals.
+        g1_short = close > upper
+        g1_long  = close < lower
 
         # ── G2: RSI crowding gate ──────────────────────────────────────────────
         rsi      = _wilder_rsi(close, rsi_period)
