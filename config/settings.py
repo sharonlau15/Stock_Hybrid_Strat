@@ -148,6 +148,22 @@ STRATEGY_PARAMS = {
         "commission_bps":   1.1,   # Per leg (IB benchmark rate)
         "risk_per_trade":   0.01,  # Risk 1% of portfolio equity per trade
     },
+    "seasonal_exhaustion_fade_long": {
+        "bb_window":        20,    # Bollinger Band lookback
+        "bb_std":           2.5,   # 2.5σ bands
+        "atr_period":       14,    # Wilder ATR period
+        "atr_avg_window":   20,    # Rolling window for average ATR
+        "atr_multiple":     1.5,   # ATR must exceed 1.5× avg ATR
+        "rsi_period":       14,    # RSI lookback
+        "rsi_os":           35,    # Oversold threshold (wider than 30 for long-only)
+        "adx_period":       14,    # ADX smoothing period
+        "adx_threshold":    30,    # ADX ≤ 30 = ranging regime (hard gate)
+        "season_threshold": 0.02,  # ±2% monthly return → bullish/bearish regime
+        "jan_discount":     0.30,  # January Effect: reduce score weight 30%
+        "neutral_discount": 0.50,  # Scale signal strength in neutral months
+        "max_positions":    4,     # Maximum simultaneous open positions
+        "time_stop_bars":   12,    # Exit flat after 12 bars if no TP/SL hit
+    },
     "sma_brownian": {
         "fast_window":  20,   # fast SMA bars (~1 month)
         "slow_window":  60,   # slow SMA bars (~1 quarter)
