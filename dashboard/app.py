@@ -390,9 +390,18 @@ def _strategies_tab() -> html.Div:
 def _trading_tab() -> html.Div:
     return html.Div([
         dcc.Interval(id="trading-interval", interval=60_000, n_intervals=0),
+
+        # ── Connection / mode status row ──────────────────────────────────────
         dbc.Row([
+            dbc.Col(html.Div(id="alpaca-connection-badge"), width="auto",
+                    className="align-self-center"),
+            dbc.Col(html.Div(id="trading-mode-badge"), width="auto",
+                    className="align-self-center"),
+            dbc.Col(html.Small(id="alpaca-account-info", className="text-muted"),
+                    className="align-self-center"),
             dbc.Col(dbc.Button("Refresh", id="refresh-trading-btn",
-                               color="secondary", size="sm"), width="auto"),
+                               color="secondary", size="sm"), width="auto",
+                    className="ms-auto"),
             dbc.Col(html.Small(id="trading-updated", className="text-muted"),
                     className="align-self-center"),
         ], className="mb-3 g-2 align-items-center"),
@@ -811,7 +820,25 @@ def _kpi_card(title: str, value: str, color: str = "light") -> dbc.Col:
     ], className="text-center h-100"), md=3, className="mb-2")
 
 
+def _check_alpaca() -> tuple[bool, str, float, float, str]:
+    """Try connecting to Alpaca and return (connected, mode, equity, buying_power, error)."""
+    try:
+        from config.client import get_trading_client
+        from config.settings import PAPER_TRADING
+        client  = get_trading_client()
+        account = client.get_account()
+        mode    = "PAPER" if PAPER_TRADING else "LIVE"
+        return True, mode, float(account.equity), float(account.buying_power), ""
+    except Exception as e:
+        from config.settings import PAPER_TRADING
+        mode = "PAPER" if PAPER_TRADING else "LIVE"
+        return False, mode, 0.0, 0.0, str(e)
+
+
 @app.callback(
+    Output("alpaca-connection-badge", "children"),
+    Output("trading-mode-badge",      "children"),
+    Output("alpaca-account-info",     "children"),
     Output("trading-kpis",    "children"),
     Output("trading-nav",     "figure"),
     Output("positions-table", "data"),
@@ -824,15 +851,40 @@ def _kpi_card(title: str, value: str, color: str = "light") -> dbc.Col:
     prevent_initial_call=False,
 )
 def _trading_cb(n_clicks, n_intervals):
+    connected, mode, equity, buying_power, err = _check_alpaca()
     state   = load_live_state()
     updated = datetime.now().strftime("%H:%M:%S")
+
+    # ── Connection badge ──────────────────────────────────────────────────────
+    if connected:
+        conn_badge = dbc.Badge("Alpaca: Connected", color="success", pill=True)
+    else:
+        conn_badge = dbc.Badge("Alpaca: Disconnected", color="danger", pill=True,
+                               title=err)
+
+    # ── Mode badge ────────────────────────────────────────────────────────────
+    mode_color = "warning" if mode == "LIVE" else "info"
+    mode_badge = dbc.Badge(f"{mode} Mode", color=mode_color, pill=True)
+
+    # ── Account info line ─────────────────────────────────────────────────────
+    if connected:
+        last_run = state.get("last_run") if state else None
+        last_run_str = f" | Last run: {last_run}" if last_run else ""
+        active = state.get("active_strategy", "–") if state else "–"
+        acct_info = (
+            f"Equity: ${equity:,.2f}  |  Buying power: ${buying_power:,.2f}"
+            f"  |  Strategy: {active}{last_run_str}"
+        )
+    else:
+        acct_info = f"Could not reach Alpaca — {err[:80]}"
 
     if not state:
         placeholder = [
             _kpi_card("NAV", "–"), _kpi_card("Cash", "–"),
             _kpi_card("Total P&L", "–"), _kpi_card("Active Strategy", "–"),
         ]
-        return (placeholder,
+        return (conn_badge, mode_badge, acct_info,
+                placeholder,
                 _empty_fig("No live state — run  python main.py --mode live  first"),
                 [], [], [], [], updated)
 
@@ -888,7 +940,7 @@ def _trading_cb(n_clicks, n_intervals):
     recent = list(reversed(trades[-20:]))
     tr_cols = [{"name": k, "id": k} for k in (recent[0].keys() if recent else [])]
 
-    return kpis, nav_fig, pos_rows, pos_cols, recent, tr_cols, updated
+    return conn_badge, mode_badge, acct_info, kpis, nav_fig, pos_rows, pos_cols, recent, tr_cols, updated
 
 
 # ─── Backtesting tab ──────────────────────────────────────────────────────────
