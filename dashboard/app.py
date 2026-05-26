@@ -444,10 +444,10 @@ def _trading_tab() -> html.Div:
         _card([
             html.H6("Active Strategy & Portfolio Weights", className="text-muted small mb-2"),
             html.Div(id="trading-strategy-panel"),
-        ], className="mb-3"),
+        ]),
 
         # ── NAV chart ─────────────────────────────────────────────────────────
-        _card(dcc.Graph(id="trading-nav"), className="mb-3"),
+        _card(dcc.Graph(id="trading-nav")),
 
         # ── Positions (with live P&L) + Recent Trades ─────────────────────────
         dbc.Row([
