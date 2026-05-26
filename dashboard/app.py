@@ -387,9 +387,40 @@ def _strategies_tab() -> html.Div:
     ], className="p-3")
 
 
+_POS_TABLE_STYLE = dict(
+    style_table      = {"overflowX": "auto"},
+    style_header     = {"backgroundColor": "#343a40", "fontWeight": "bold", "color": "#f8f9fa"},
+    style_data       = {"backgroundColor": "#212529", "color": "#f8f9fa"},
+    style_data_conditional = [
+        {"if": {"row_index": "odd"},          "backgroundColor": "#2c3136"},
+        {"if": {"filter_query": "{P&L $} > 0", "column_id": "P&L $"},  "color": "#28a745"},
+        {"if": {"filter_query": "{P&L $} < 0", "column_id": "P&L $"},  "color": "#dc3545"},
+        {"if": {"filter_query": "{P&L %} > 0", "column_id": "P&L %"},  "color": "#28a745"},
+        {"if": {"filter_query": "{P&L %} < 0", "column_id": "P&L %"},  "color": "#dc3545"},
+    ],
+    style_cell = {"textAlign": "center", "padding": "6px 10px", "minWidth": "80px",
+                  "fontSize": "13px"},
+)
+
+_TRADES_TABLE_STYLE = dict(
+    style_table  = {"overflowX": "auto"},
+    style_header = {"backgroundColor": "#343a40", "fontWeight": "bold", "color": "#f8f9fa"},
+    style_data   = {"backgroundColor": "#212529", "color": "#f8f9fa"},
+    style_data_conditional = [
+        {"if": {"row_index": "odd"},                                   "backgroundColor": "#2c3136"},
+        {"if": {"filter_query": '{side} = "buy"',  "column_id": "side"}, "color": "#28a745"},
+        {"if": {"filter_query": '{side} = "sell"', "column_id": "side"}, "color": "#dc3545"},
+        {"if": {"filter_query": '{side} = "BUY"',  "column_id": "side"}, "color": "#28a745"},
+        {"if": {"filter_query": '{side} = "SELL"', "column_id": "side"}, "color": "#dc3545"},
+    ],
+    style_cell = {"textAlign": "center", "padding": "6px 10px", "minWidth": "80px",
+                  "fontSize": "13px"},
+)
+
+
 def _trading_tab() -> html.Div:
     return html.Div([
-        dcc.Interval(id="trading-interval", interval=60_000, n_intervals=0),
+        dcc.Interval(id="trading-interval", interval=30_000, n_intervals=0),
 
         # ── Connection / mode status row ──────────────────────────────────────
         dbc.Row([
@@ -406,17 +437,75 @@ def _trading_tab() -> html.Div:
                     className="align-self-center"),
         ], className="mb-3 g-2 align-items-center"),
 
+        # ── 5 KPI cards ───────────────────────────────────────────────────────
         dbc.Row(id="trading-kpis", className="mb-3"),
-        _card(dcc.Graph(id="trading-nav")),
 
+        # ── Active strategy + current weights panel ───────────────────────────
+        _card([
+            html.H6("Active Strategy & Portfolio Weights", className="text-muted small mb-2"),
+            html.Div(id="trading-strategy-panel"),
+        ], className="mb-3"),
+
+        # ── NAV chart ─────────────────────────────────────────────────────────
+        _card(dcc.Graph(id="trading-nav"), className="mb-3"),
+
+        # ── Positions (with live P&L) + Recent Trades ─────────────────────────
         dbc.Row([
             dbc.Col(_card([
                 html.H6("Open Positions", className="text-muted small mb-2"),
-                dash_table.DataTable(id="positions-table", page_size=10, **_TABLE_STYLE),
-            ]), md=6),
+                dash_table.DataTable(id="positions-table", page_size=10, **_POS_TABLE_STYLE),
+            ]), md=8),
             dbc.Col(_card([
                 html.H6("Recent Trades", className="text-muted small mb-2"),
-                dash_table.DataTable(id="trades-table", page_size=10, **_TABLE_STYLE),
+                dash_table.DataTable(id="trades-table", page_size=10, **_TRADES_TABLE_STYLE),
+            ]), md=4),
+        ]),
+    ], className="p-3")
+
+
+def _risk_tab() -> html.Div:
+    return html.Div([
+        dcc.Interval(id="risk-interval", interval=10_000, n_intervals=0),
+
+        dbc.Row([
+            # ── Kill switch ────────────────────────────────────────────────────
+            dbc.Col(_card([
+                html.H5("Kill Switch", className="mb-3"),
+                dbc.Row([
+                    dbc.Col(html.Span("Status: ", className="text-muted"), width="auto",
+                            className="align-self-center"),
+                    dbc.Col(html.Div(id="kill-switch-badge"), width="auto",
+                            className="align-self-center"),
+                ], className="mb-3 align-items-center"),
+                html.Label("Mode", className="small text-muted"),
+                dbc.RadioItems(
+                    id="kill-switch-mode",
+                    options=[
+                        {"label": "Halt New Orders", "value": "halt"},
+                        {"label": "Close All Positions + Halt", "value": "close_all"},
+                    ],
+                    value="halt",
+                    className="mb-3",
+                ),
+                html.Label("Note (optional)", className="small text-muted"),
+                dbc.Input(id="kill-switch-note", type="text",
+                          placeholder="Reason for halting…",
+                          className="mb-3",
+                          style={"backgroundColor": "#2c3136", "color": "#f8f9fa",
+                                 "border": "1px solid #495057"}),
+                dbc.Row([
+                    dbc.Col(dbc.Button("ACTIVATE", id="kill-activate-btn",
+                                       color="danger", className="me-2"), width="auto"),
+                    dbc.Col(dbc.Button("DEACTIVATE", id="kill-deactivate-btn",
+                                       color="success"), width="auto"),
+                ], className="mb-3"),
+                html.Div(id="kill-switch-msg", className="text-info small"),
+            ]), md=6),
+
+            # ── Connection detail ──────────────────────────────────────────────
+            dbc.Col(_card([
+                html.H5("Connection Status", className="mb-3"),
+                html.Div(id="risk-connection-detail"),
             ]), md=6),
         ]),
     ], className="p-3")
@@ -534,6 +623,8 @@ app.layout = dbc.Container([
         dbc.Tab(_strategies_tab(), label="Strategies",       tab_id="tab-strategies",
                 label_style={"fontWeight": "500"}),
         dbc.Tab(_trading_tab(),    label="Trading Progress", tab_id="tab-trading",
+                label_style={"fontWeight": "500"}),
+        dbc.Tab(_risk_tab(),       label="Risk Controls",    tab_id="tab-risk",
                 label_style={"fontWeight": "500"}),
         dbc.Tab(_backtesting_tab(),label="Backtesting",      tab_id="tab-backtesting",
                 label_style={"fontWeight": "500"}),
@@ -835,112 +926,286 @@ def _check_alpaca() -> tuple[bool, str, float, float, str]:
         return False, mode, 0.0, 0.0, str(e)
 
 
+def _fetch_live_prices() -> dict:
+    """Fetch latest Alpaca trade prices. Returns {} on failure."""
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockLatestTradeRequest
+        from config.settings import (PAPER_TRADING, PAPER_API_KEY, PAPER_API_SECRET,
+                                     LIVE_API_KEY, LIVE_API_SECRET, UNIVERSE)
+        key    = PAPER_API_KEY if PAPER_TRADING else LIVE_API_KEY
+        secret = PAPER_API_SECRET if PAPER_TRADING else LIVE_API_SECRET
+        client = StockHistoricalDataClient(key, secret)
+        trades = client.get_stock_latest_trade(StockLatestTradeRequest(symbol_or_symbols=UNIVERSE))
+        return {sym: float(t.price) for sym, t in trades.items()}
+    except Exception:
+        return {}
+
+
 @app.callback(
-    Output("alpaca-connection-badge", "children"),
-    Output("trading-mode-badge",      "children"),
-    Output("alpaca-account-info",     "children"),
-    Output("trading-kpis",    "children"),
-    Output("trading-nav",     "figure"),
-    Output("positions-table", "data"),
-    Output("positions-table", "columns"),
-    Output("trades-table",    "data"),
-    Output("trades-table",    "columns"),
-    Output("trading-updated", "children"),
-    Input("refresh-trading-btn","n_clicks"),
-    Input("trading-interval",  "n_intervals"),
+    Output("alpaca-connection-badge",  "children"),
+    Output("trading-mode-badge",       "children"),
+    Output("alpaca-account-info",      "children"),
+    Output("trading-kpis",             "children"),
+    Output("trading-strategy-panel",   "children"),
+    Output("trading-nav",              "figure"),
+    Output("positions-table",          "data"),
+    Output("positions-table",          "columns"),
+    Output("trades-table",             "data"),
+    Output("trades-table",             "columns"),
+    Output("trading-updated",          "children"),
+    Input("refresh-trading-btn", "n_clicks"),
+    Input("trading-interval",    "n_intervals"),
     prevent_initial_call=False,
 )
 def _trading_cb(n_clicks, n_intervals):
+    from config.settings import STOP_LOSS_PCT, TAKE_PROFIT_PCT, TRAILING_STOP_PCT, USE_TRAILING_STOP
+    from db.engine_controls import load_engine_controls
+
     connected, mode, equity, buying_power, err = _check_alpaca()
-    state   = load_live_state()
-    updated = datetime.now().strftime("%H:%M:%S")
+    live_prices = _fetch_live_prices() if connected else {}
+    state       = load_live_state()
+    controls    = load_engine_controls()
+    updated     = datetime.now().strftime("%H:%M:%S")
 
     # ── Connection badge ──────────────────────────────────────────────────────
-    if connected:
-        conn_badge = dbc.Badge("Alpaca: Connected", color="success", pill=True)
-    else:
-        conn_badge = dbc.Badge("Alpaca: Disconnected", color="danger", pill=True,
-                               title=err)
+    conn_badge = (
+        dbc.Badge("Alpaca: Connected",    color="success", pill=True) if connected else
+        dbc.Badge("Alpaca: Disconnected", color="danger",  pill=True, title=err)
+    )
 
     # ── Mode badge ────────────────────────────────────────────────────────────
-    mode_color = "warning" if mode == "LIVE" else "info"
-    mode_badge = dbc.Badge(f"{mode} Mode", color=mode_color, pill=True)
+    mode_badge = dbc.Badge(f"{mode} Mode",
+                           color="warning" if mode == "LIVE" else "info", pill=True)
 
     # ── Account info line ─────────────────────────────────────────────────────
     if connected:
-        last_run = state.get("last_run") if state else None
-        last_run_str = f" | Last run: {last_run}" if last_run else ""
-        active = state.get("active_strategy", "–") if state else "–"
+        last_run = (state or {}).get("last_run")
+        active   = (state or {}).get("active_strategy", "–")
         acct_info = (
             f"Equity: ${equity:,.2f}  |  Buying power: ${buying_power:,.2f}"
-            f"  |  Strategy: {active}{last_run_str}"
+            f"  |  Strategy: {active}"
+            + (f"  |  Last run: {last_run}" if last_run else "")
         )
     else:
         acct_info = f"Could not reach Alpaca — {err[:80]}"
 
+    # ── Kill switch engine status ─────────────────────────────────────────────
+    kill_active = controls.get("kill_switch", False)
+
     if not state:
-        placeholder = [
+        engine_badge = dbc.Badge("HALTED", color="danger") if kill_active else dbc.Badge("IDLE", color="secondary")
+        placeholder_kpis = [
             _kpi_card("NAV", "–"), _kpi_card("Cash", "–"),
-            _kpi_card("Total P&L", "–"), _kpi_card("Active Strategy", "–"),
+            _kpi_card("Total P&L", "–"), _kpi_card("Open Positions", "–"),
+            dbc.Col(dbc.Card([
+                dbc.CardHeader("Engine", className="text-muted", style={"fontSize": "12px"}),
+                dbc.CardBody(engine_badge),
+            ], className="text-center h-100"), md=3, className="mb-2"),
         ]
-        return (conn_badge, mode_badge, acct_info,
-                placeholder,
+        return (conn_badge, mode_badge, acct_info, placeholder_kpis,
+                html.Span("No live state — start engine first", className="text-muted"),
                 _empty_fig("No live state — run  python main.py --mode live  first"),
                 [], [], [], [], updated)
 
-    cash     = state.get("cash_usd", 0)
+    cash      = state.get("cash_usd", 0)
     positions = {s: q for s, q in state.get("positions", {}).items() if q != 0}
     nav_hist  = state.get("nav_history", [])
     active    = state.get("active_strategy", "–")
     trades    = state.get("trade_log", [])
     entries   = state.get("position_entries", {})
+    weights   = state.get("current_weights", {})
 
-    cur_nav = nav_hist[-1]["nav"] if nav_hist else cash
-    start   = nav_hist[0]["nav"]  if nav_hist else cash
+    # Compute NAV using live prices if available
+    if live_prices:
+        pos_value = sum(qty * live_prices.get(sym, 0) for sym, qty in positions.items())
+        cur_nav   = cash + pos_value
+    else:
+        cur_nav = nav_hist[-1]["nav"] if nav_hist else cash
+
+    start   = nav_hist[0]["nav"] if nav_hist else cash
     pnl     = cur_nav - start
     pnl_pct = pnl / start * 100 if start else 0
     pnl_col = "success" if pnl >= 0 else "danger"
 
+    engine_badge = dbc.Badge("HALTED", color="danger") if kill_active else dbc.Badge("LIVE", color="success")
+
     kpis = [
-        _kpi_card("NAV",             f"${cur_nav:,.2f}",                 "info"),
-        _kpi_card("Cash",            f"${cash:,.2f}",                     "light"),
-        _kpi_card("Total P&L",       f"${pnl:+,.2f} ({pnl_pct:+.2f}%)", pnl_col),
-        _kpi_card("Active Strategy", active,                               "warning"),
+        _kpi_card("NAV",              f"${cur_nav:,.2f}",                 "info"),
+        _kpi_card("Cash",             f"${cash:,.2f}",                    "light"),
+        _kpi_card("Total P&L",        f"${pnl:+,.2f} ({pnl_pct:+.2f}%)", pnl_col),
+        _kpi_card("Open Positions",   str(len(positions)),                 "light"),
+        dbc.Col(dbc.Card([
+            dbc.CardHeader("Engine", className="text-muted", style={"fontSize": "12px"}),
+            dbc.CardBody(engine_badge),
+        ], className="text-center h-100"), md=3, className="mb-2"),
     ]
 
-    # NAV history chart
+    # ── Active strategy + weights panel ──────────────────────────────────────
+    if active and active != "–":
+        strat_label = html.Span(
+            active.replace("_", " ").title(),
+            className="fw-bold fs-6 me-3",
+            style={"color": "#ffc107"},
+        )
+        weight_items = []
+        for sym, w in sorted(weights.items(), key=lambda x: -x[1]):
+            if w > 0.001:
+                weight_items.append(
+                    dbc.Badge(
+                        f"{sym} {w*100:.1f}%",
+                        color="primary" if w >= 0.10 else "secondary",
+                        className="me-1 mb-1",
+                        style={"fontSize": "12px"},
+                    )
+                )
+        strategy_panel = html.Div([strat_label] + weight_items)
+    else:
+        strategy_panel = html.Span("No active strategy yet", className="text-muted")
+
+    # ── NAV history chart ─────────────────────────────────────────────────────
     if nav_hist:
-        dates = [e["date"] for e in nav_hist]
-        navs  = [e["nav"]  for e in nav_hist]
+        dates   = [e["date"] for e in nav_hist]
+        navs    = [e["nav"]  for e in nav_hist]
         nav_fig = go.Figure([
-            go.Scatter(x=dates, y=navs, mode="lines+markers",
-                       line=dict(color="#0d6efd", width=2),
-                       marker=dict(size=4)),
+            go.Scatter(
+                x=dates, y=navs, mode="lines",
+                fill="tozeroy",
+                line=dict(color="#00b4d8", width=2),
+                fillcolor="rgba(0,180,216,0.12)",
+            ),
         ])
         nav_fig.add_hline(y=start, line_dash="dot", line_color="gray",
                           annotation_text="Start NAV")
         nav_fig.update_layout(
             template=CHART_TEMPLATE, paper_bgcolor=CHART_BG, plot_bgcolor=CHART_BG,
-            title="Portfolio NAV History", yaxis_title="NAV (USD)", height=340,
+            title="Portfolio NAV History", yaxis_title="NAV (USD)", height=320,
+            showlegend=False,
         )
     else:
         nav_fig = _empty_fig("No NAV history recorded yet")
 
-    # Positions table
-    pos_rows = [
-        {"Symbol": sym, "Qty": qty,
-         "Entry Price": f"${entries.get(sym, {}).get('price', 0):,.2f}",
-         "Entry Date":  entries.get(sym, {}).get("date", "–"),
-         "Peak":        f"${entries.get(sym, {}).get('peak', 0):,.2f}"}
-        for sym, qty in positions.items()
-    ]
-    pos_cols = [{"name": k, "id": k} for k in (pos_rows[0].keys() if pos_rows else [])]
+    # ── Positions table (with live P&L, SL, TP) ──────────────────────────────
+    pos_rows = []
+    for sym, qty in positions.items():
+        entry_info  = entries.get(sym, {})
+        entry_px    = entry_info.get("entry_price", entry_info.get("price", 0))
+        peak_px     = entry_info.get("peak_price",  entry_info.get("peak", entry_px))
+        current_px  = live_prices.get(sym, 0)
+        pnl_d       = (current_px - entry_px) * qty if current_px and entry_px else 0
+        pnl_p       = (current_px / entry_px - 1) * 100 if entry_px and current_px else 0
+        sl_px       = entry_px * (1 - STOP_LOSS_PCT)
+        tp_px       = entry_px * (1 + TAKE_PROFIT_PCT)
+        trail_px    = peak_px  * (1 - TRAILING_STOP_PCT) if USE_TRAILING_STOP else None
+        row = {
+            "Symbol":   sym,
+            "Qty":      round(qty, 4),
+            "Entry $":  round(entry_px, 2)   if entry_px  else "–",
+            "Current $":round(current_px, 2) if current_px else "–",
+            "P&L $":    round(pnl_d, 2),
+            "P&L %":    round(pnl_p, 2),
+            "SL $":     round(sl_px, 2)      if entry_px  else "–",
+            "TP $":     round(tp_px, 2)      if entry_px  else "–",
+        }
+        if USE_TRAILING_STOP and trail_px:
+            row["Trail $"] = round(trail_px, 2)
+        pos_rows.append(row)
 
-    # Trade log (most recent 20, newest first)
-    recent = list(reversed(trades[-20:]))
-    tr_cols = [{"name": k, "id": k} for k in (recent[0].keys() if recent else [])]
+    pos_cols = [{"name": k, "id": k} for k in (pos_rows[0].keys() if pos_rows else
+                ["Symbol", "Qty", "Entry $", "Current $", "P&L $", "P&L %", "SL $", "TP $"])]
 
-    return conn_badge, mode_badge, acct_info, kpis, nav_fig, pos_rows, pos_cols, recent, tr_cols, updated
+    # ── Trade log (most recent 20, newest first, buy/sell colored) ────────────
+    recent  = list(reversed(trades[-20:]))
+    tr_cols = [{"name": k, "id": k} for k in (recent[0].keys() if recent else
+               ["time", "symbol", "side", "qty", "price", "reason"])]
+
+    return (conn_badge, mode_badge, acct_info, kpis, strategy_panel,
+            nav_fig, pos_rows, pos_cols, recent, tr_cols, updated)
+
+
+# ─── Risk Controls tab ────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("kill-switch-badge",   "children"),
+    Output("risk-connection-detail", "children"),
+    Input("kill-activate-btn",    "n_clicks"),
+    Input("kill-deactivate-btn",  "n_clicks"),
+    Input("risk-interval",        "n_intervals"),
+    State("kill-switch-mode",     "value"),
+    State("kill-switch-note",     "value"),
+    prevent_initial_call=False,
+)
+def _risk_cb(activate_clicks, deactivate_clicks, n_intervals, ks_mode, ks_note):
+    from db.engine_controls import load_engine_controls, save_engine_controls
+
+    trigger = ctx.triggered_id
+    if trigger == "kill-activate-btn" and activate_clicks:
+        close_all = (ks_mode == "close_all")
+        save_engine_controls(
+            kill_switch=True,
+            kill_mode="halt",
+            close_all_triggered=close_all,
+            note=ks_note or "",
+        )
+    elif trigger == "kill-deactivate-btn" and deactivate_clicks:
+        save_engine_controls(
+            kill_switch=False,
+            kill_mode="halt",
+            close_all_triggered=False,
+            note="",
+        )
+
+    controls     = load_engine_controls()
+    kill_active  = controls.get("kill_switch", False)
+    kill_note    = controls.get("note", "")
+
+    if kill_active:
+        badge = dbc.Badge(
+            "ACTIVE" + (f" — {kill_note}" if kill_note else ""),
+            color="danger", pill=True,
+        )
+    else:
+        badge = dbc.Badge("INACTIVE", color="success", pill=True)
+
+    # Connection status detail
+    connected, mode, equity, buying_power, err = _check_alpaca()
+    if connected:
+        conn_detail = html.Div([
+            dbc.Row([
+                dbc.Col(html.Span("Alpaca:", className="text-muted"), width="auto"),
+                dbc.Col(dbc.Badge("CONNECTED", color="success"), width="auto"),
+            ], className="mb-2 align-items-center"),
+            html.Small(f"Mode: {mode}  |  Equity: ${equity:,.2f}  |  "
+                       f"Buying power: ${buying_power:,.2f}", className="text-muted"),
+        ])
+    else:
+        conn_detail = html.Div([
+            dbc.Row([
+                dbc.Col(html.Span("Alpaca:", className="text-muted"), width="auto"),
+                dbc.Col(dbc.Badge("DISCONNECTED", color="danger"), width="auto"),
+            ], className="mb-2 align-items-center"),
+            html.Small(err[:120], className="text-danger"),
+        ])
+
+    return badge, conn_detail
+
+
+@app.callback(
+    Output("kill-switch-msg", "children"),
+    Input("kill-activate-btn",   "n_clicks"),
+    Input("kill-deactivate-btn", "n_clicks"),
+    State("kill-switch-mode",    "value"),
+    prevent_initial_call=True,
+)
+def _kill_msg(activate, deactivate, mode_val):
+    trigger = ctx.triggered_id
+    if trigger == "kill-activate-btn" and activate:
+        if mode_val == "close_all":
+            return "Kill switch ACTIVATED — engine will close all positions on next monitor cycle."
+        return "Kill switch ACTIVATED — new orders halted."
+    if trigger == "kill-deactivate-btn" and deactivate:
+        return "Kill switch DEACTIVATED — engine resumed."
+    return ""
 
 
 # ─── Backtesting tab ──────────────────────────────────────────────────────────

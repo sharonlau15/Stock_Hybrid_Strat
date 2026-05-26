@@ -46,6 +46,7 @@ from db.state import (
     load_nav_history_for_report,
     load_trade_log_for_report,
 )
+from db.engine_controls import load_engine_controls, save_engine_controls
 
 from alpaca.trading.requests import MarketOrderRequest, GetAssetsRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
@@ -283,6 +284,34 @@ def execute_rebalance(target_weights: pd.Series, state: dict, nav: float,
 # ══════════════════════════════════════════════════════════════════════════════
 def price_monitor_job():
     """Poll prices and immediately exit any position that breaches a risk limit."""
+    controls = load_engine_controls()
+
+    # Close-all: market-sell everything, then stay halted
+    if controls.get("close_all_triggered"):
+        logger.warning("Kill switch close-all triggered — liquidating all positions")
+        state  = load_state()
+        prices = fetch_current_prices()
+        all_exits = {
+            sym: prices[sym]
+            for sym, qty in state["positions"].items()
+            if qty != 0 and sym in prices
+        }
+        if all_exits:
+            state = execute_exits(all_exits, state)
+            nav   = compute_nav(state, prices)
+            state["nav_history"].append({
+                "date":  str(datetime.now(timezone.utc)),
+                "nav":   round(nav, 2),
+                "event": "kill_switch_close_all",
+            })
+            save_state(state)
+        save_engine_controls(
+            kill_switch=True, kill_mode="halt",
+            close_all_triggered=False,
+            note=controls.get("note", ""),
+        )
+        return
+
     state = load_state()
     open_positions = {sym: qty for sym, qty in state["positions"].items() if qty != 0}
     if not open_positions:
@@ -307,6 +336,11 @@ def price_monitor_job():
 # ══════════════════════════════════════════════════════════════════════════════
 def signal_rebalance_job(strategies: list, signals_dict: dict):
     """Recompute signals and rebalance only if weight delta exceeds threshold."""
+    controls = load_engine_controls()
+    if controls.get("kill_switch"):
+        logger.warning("Kill switch ACTIVE — skipping signal recompute")
+        return
+
     logger.info("=" * 55)
     logger.info(f"Signal recompute — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
