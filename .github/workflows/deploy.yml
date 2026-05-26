@@ -1,0 +1,44 @@
+name: Deploy to Stock Hybrid Strat Server
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key:      ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/stock_hybrid_strat
+            git pull origin main
+
+            source venv/bin/activate
+            pip install -q -r requirements.txt
+
+            # Restart trading engine
+            screen -X -S shs_engine quit 2>/dev/null || true
+            sleep 2
+            screen -dmS shs_engine bash -c "
+              cd /opt/stock_hybrid_strat
+              source venv/bin/activate
+              python3 main.py --mode live --run-now 2>&1 | tee -a logs/engine.log
+            "
+
+            # Restart dashboard
+            screen -X -S shs_dashboard quit 2>/dev/null || true
+            sleep 1
+            screen -dmS shs_dashboard bash -c "
+              cd /opt/stock_hybrid_strat
+              source venv/bin/activate
+              python3 dashboard/app.py 2>&1 | tee -a logs/dashboard.log
+            "
+
+            echo "Deploy complete — $(date -u)"
