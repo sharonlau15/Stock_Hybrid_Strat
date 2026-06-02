@@ -62,7 +62,8 @@ class MaxSharpePortfolio(BasePortfolio):
         n       = len(symbols)
         sig     = signals.fillna(0).values.astype(float)
         mu      = sig.copy()
-        cov_arr = cov.reindex(index=symbols, columns=symbols).fillna(0).values
+        cov_arr = np.array(cov.reindex(index=symbols, columns=symbols).fillna(0).values,
+                           dtype=float, copy=True)
         cov_arr += np.eye(n) * 1e-6
 
         bounds = [(-max_pos, max_pos)] * n if long_short else [(0.0, max_pos)] * n

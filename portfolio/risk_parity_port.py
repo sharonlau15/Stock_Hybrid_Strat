@@ -62,7 +62,8 @@ class RiskParityPortfolio(BasePortfolio):
 
         symbols = pos.index.tolist()
         n       = len(symbols)
-        cov_arr = cov.reindex(index=symbols, columns=symbols).fillna(0).values
+        cov_arr = np.array(cov.reindex(index=symbols, columns=symbols).fillna(0).values,
+                           dtype=float, copy=True)
         cov_arr += np.eye(n) * 1e-6
 
         target_rc = 1.0 / n  # equal fractional contribution
