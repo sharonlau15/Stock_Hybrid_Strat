@@ -170,6 +170,9 @@ STRATEGY_PARAMS = {
         "drift_window": 63,   # GBM drift estimation window (~1 quarter)
         "min_signal":   0.10, # ignore signals weaker than this
     },
+    "coin_flip": {
+        "seed": 42,    # fixed seed for reproducibility — change to get a different random path
+    },
     "exhaustion_fade": {
         "bb_window":      20,    # Bollinger Band lookback
         "bb_std":          2.0,  # 2.0σ (tighter than crypto 2.5σ — stocks less volatile)

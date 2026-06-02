@@ -23,6 +23,7 @@ from strategies.sma_brownian                   import SMABrownianStrategy
 from strategies.seasonal_exhaustion_fade       import SeasonalExhaustionFadeStrategy
 from strategies.seasonal_exhaustion_fade_long  import SeasonalExhaustionFadeLongStrategy
 from strategies.macro_regime                   import MacroRegimeStrategy
+from strategies.coin_flip                      import CoinFlipStrategy
 
 # ── Registry ───────────────────────────────────────────────────────────────────
 REGISTRY: list[type] = [
@@ -37,6 +38,7 @@ REGISTRY: list[type] = [
     SeasonalExhaustionFadeStrategy,
     SeasonalExhaustionFadeLongStrategy,
     MacroRegimeStrategy,
+    CoinFlipStrategy,
 ]
 
 
