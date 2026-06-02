@@ -52,7 +52,12 @@ def load_constant_weight_metrics()  -> dict:         return _load_json("constant
 def load_constant_weight_returns()  -> pd.DataFrame: return _load_csv("constant_weight_portfolio_returns.csv")
 def load_constant_strategy_metrics()-> dict:         return _load_json("constant_strategy_strategy_metrics.json")
 def load_constant_strategy_returns()-> pd.DataFrame: return _load_csv("constant_strategy_portfolio_returns.csv")
-def load_live_state()               -> dict:         return _load_json("live_state.json")
+def load_live_state() -> dict:
+    try:
+        from db.state import load_state
+        return load_state()
+    except Exception:
+        return _load_json("live_state.json")
 
 
 # ── Parsers ────────────────────────────────────────────────────────────────────
