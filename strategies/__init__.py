@@ -24,6 +24,7 @@ from strategies.seasonal_exhaustion_fade       import SeasonalExhaustionFadeStra
 from strategies.seasonal_exhaustion_fade_long  import SeasonalExhaustionFadeLongStrategy
 from strategies.macro_regime                   import MacroRegimeStrategy
 from strategies.coin_flip                      import CoinFlipStrategy
+from strategies.lucky_macro_regime             import LuckyMacroRegimeStrategy
 
 # ── Registry ───────────────────────────────────────────────────────────────────
 REGISTRY: list[type] = [
@@ -39,6 +40,7 @@ REGISTRY: list[type] = [
     SeasonalExhaustionFadeLongStrategy,
     MacroRegimeStrategy,
     CoinFlipStrategy,
+    LuckyMacroRegimeStrategy,
 ]
 
 

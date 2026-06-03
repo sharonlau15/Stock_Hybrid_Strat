@@ -173,6 +173,9 @@ STRATEGY_PARAMS = {
     "coin_flip": {
         "seed": 42,    # fixed seed for reproducibility — change to get a different random path
     },
+    "lucky_macro_regime": {
+        "seed": 99,    # different seed from coin_flip so paths don't correlate
+    },
     "exhaustion_fade": {
         "bb_window":      20,    # Bollinger Band lookback
         "bb_std":          2.0,  # 2.0σ (tighter than crypto 2.5σ — stocks less volatile)

@@ -64,7 +64,7 @@ STRATEGY_NAMES = [
     "momentum", "mean_reversion", "risk_parity",
     "cross_sectional_momentum", "vol_breakout", "ml_signal",
     "exhaustion_fade", "sma_brownian", "seasonal_exhaustion_fade",
-    "seasonal_exhaustion_fade_long", "macro_regime", "coin_flip",
+    "seasonal_exhaustion_fade_long", "macro_regime", "coin_flip", "lucky_macro_regime",
 ]
 
 # ── Background job state ───────────────────────────────────────────────────────
