@@ -420,7 +420,7 @@ _TRADES_TABLE_STYLE = dict(
 
 def _trading_tab() -> html.Div:
     return html.Div([
-        dcc.Interval(id="trading-interval", interval=30_000, n_intervals=0),
+        dcc.Interval(id="trading-interval", interval=120_000, n_intervals=0),
 
         # ── Connection / mode status row ──────────────────────────────────────
         dbc.Row([
@@ -927,16 +927,20 @@ def _check_alpaca() -> tuple[bool, str, float, float, str]:
 
 
 def _fetch_live_prices() -> dict:
-    """Fetch latest Alpaca trade prices. Returns {} on failure."""
+    """Fetch latest Alpaca trade prices. Only fetches when market is open."""
     try:
+        from config.client import get_trading_client
+        client = get_trading_client()
+        if not client.get_clock().is_open:
+            return {}
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockLatestTradeRequest
         from config.settings import (PAPER_TRADING, PAPER_API_KEY, PAPER_API_SECRET,
                                      LIVE_API_KEY, LIVE_API_SECRET, UNIVERSE)
         key    = PAPER_API_KEY if PAPER_TRADING else LIVE_API_KEY
         secret = PAPER_API_SECRET if PAPER_TRADING else LIVE_API_SECRET
-        client = StockHistoricalDataClient(key, secret)
-        trades = client.get_stock_latest_trade(StockLatestTradeRequest(symbol_or_symbols=UNIVERSE))
+        data_client = StockHistoricalDataClient(key, secret)
+        trades = data_client.get_stock_latest_trade(StockLatestTradeRequest(symbol_or_symbols=UNIVERSE))
         return {sym: float(t.price) for sym, t in trades.items()}
     except Exception:
         return {}
