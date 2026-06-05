@@ -29,6 +29,7 @@ import pandas as pd
 from loguru import logger
 from apscheduler.schedulers.background import BackgroundScheduler
 
+import os
 from config.settings import (
     UNIVERSE, PORTFOLIO_USD, MIN_ORDER_USD,
     PAPER_TRADING, RESULT_DIR, LOG_DIR,
@@ -38,7 +39,6 @@ from config.settings import (
     MAX_LIVE_POSITIONS, MAX_POSITION_SIZE,
     BACKTEST_START, RISK_LOOKBACK_DAYS, TRADING_DAYS,
 )
-from config.client import get_trading_client
 from data.ingestion import get_universe_ohlcv, build_close_matrix, build_return_matrix
 from strategies.macro_regime import MacroRegimeStrategy
 from portfolio.max_sharpe import MaxSharpePortfolio
@@ -193,9 +193,26 @@ def _save_state(state: dict):
 # LIVE ENGINE — helpers (mirror of live_engine.py but macro-only)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _mr_keys() -> tuple[str, str]:
+    """Return the Macro Regime-specific paper API key and secret."""
+    key    = os.getenv("ALPACA_PAPER_API_KEY_MR")
+    secret = os.getenv("ALPACA_PAPER_API_SECRET_MR")
+    if not key or not secret:
+        raise RuntimeError(
+            "ALPACA_PAPER_API_KEY_MR / ALPACA_PAPER_API_SECRET_MR not set in env"
+        )
+    return key, secret
+
+
+def _get_mr_trading_client():
+    from alpaca.trading.client import TradingClient
+    key, secret = _mr_keys()
+    return TradingClient(key, secret, paper=True)
+
+
 def _market_is_open() -> bool:
     try:
-        return get_trading_client().get_clock().is_open
+        return _get_mr_trading_client().get_clock().is_open
     except Exception:
         return False
 
@@ -203,10 +220,7 @@ def _market_is_open() -> bool:
 def _fetch_prices() -> dict:
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockLatestTradeRequest
-    from config.settings import (PAPER_API_KEY, PAPER_API_SECRET,
-                                  LIVE_API_KEY,  LIVE_API_SECRET)
-    key    = PAPER_API_KEY if PAPER_TRADING else LIVE_API_KEY
-    secret = PAPER_API_SECRET if PAPER_TRADING else LIVE_API_SECRET
+    key, secret = _mr_keys()
     client = StockHistoricalDataClient(key, secret)
     try:
         trades = client.get_stock_latest_trade(
@@ -254,7 +268,7 @@ def _check_exits(state: dict, prices: dict) -> dict:
 
 
 def _execute_exits(exits: dict, state: dict) -> dict:
-    client = get_trading_client()
+    client = _get_mr_trading_client()
     for sym, price in exits.items():
         qty = state["positions"].get(sym, 0)
         if qty == 0:
@@ -303,7 +317,7 @@ def _execute_rebalance(target_w: pd.Series, state: dict,
         logger.warning("Market closed — skipping rebalance")
         return state
 
-    client   = get_trading_client()
+    client   = _get_mr_trading_client()
     cur_vals = {s: state["positions"].get(s, 0) * prices.get(s, 0) for s in UNIVERSE}
     cur_w    = {s: v / nav for s, v in cur_vals.items()} if nav > 0 else {}
 
@@ -449,9 +463,13 @@ def run_live(run_now: bool = False):
     logger.info(f"  State file    : {STATE_FILE}")
     logger.info("=" * 60)
 
-    # Check connectivity
-    from config.client import check_connectivity
-    check_connectivity()
+    # Check connectivity using MR-specific keys
+    try:
+        acct = _get_mr_trading_client().get_account()
+        logger.info(f"Alpaca (MR paper) connected — equity=${float(acct.equity):,.2f}")
+    except Exception as e:
+        logger.error(f"Alpaca (MR paper) connection failed: {e}")
+        sys.exit(1)
 
     scheduler = BackgroundScheduler(timezone="UTC")
 
