@@ -274,10 +274,9 @@ def _execute_exits(exits: dict, state: dict) -> dict:
         if qty == 0:
             continue
         try:
-            order = client.submit_order(MarketOrderRequest(
-                symbol=sym, qty=qty,
-                side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
-            ))
+            # Use close_position so Alpaca closes exactly what it holds —
+            # avoids fractional qty mismatch between local state and Alpaca's fill record.
+            order = client.close_position(sym)
             state["positions"][sym] = 0.0
             state["cash_usd"]      += qty * price
             state["position_entries"].pop(sym, None)
