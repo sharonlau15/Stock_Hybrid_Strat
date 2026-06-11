@@ -53,6 +53,29 @@ UNIVERSE = [
     "QQQ",    # Nasdaq ETF    — Tech benchmark
 ]
 
+# Broader cross-section used ONLY for computing breadth and cross-momentum
+# signals in MacroRegimeStrategy. No ETF indices — independent stocks only,
+# covering all 11 GICS sectors so breadth is a genuine market-wide reading
+# rather than an echo chamber of the same 10-12 correlated tech-heavy names.
+SIGNAL_UNIVERSE = [
+    # Technology (6)
+    "AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN",
+    # Financials (3)
+    "JPM",  "BAC",  "GS",
+    # Healthcare (3)
+    "JNJ",  "UNH",  "PFE",
+    # Energy (2)
+    "XOM",  "CVX",
+    # Consumer Discretionary (2)
+    "HD",   "MCD",
+    # Consumer Staples (2)
+    "WMT",  "PG",
+    # Industrials (2)
+    "CAT",  "HON",
+    # Utilities / Materials (2)
+    "NEE",  "LIN",
+]
+
 # ── Data ───────────────────────────────────────────────────────────────────────
 TIMEFRAME        = "1Day"          # Alpaca timeframe string
 BACKTEST_START   = "2022-01-01"    # Start date for historical data

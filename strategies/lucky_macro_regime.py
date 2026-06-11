@@ -35,17 +35,23 @@ class LuckyMacroRegimeStrategy(BaseStrategy):
         super().__init__("lucky_macro_regime", {**defaults, **(params or {})})
         self._macro = MacroRegimeStrategy()
 
-    def _composite(self, close: pd.DataFrame, returns: pd.DataFrame) -> pd.Series:
+    def _composite(self, close: pd.DataFrame, returns: pd.DataFrame, **kwargs) -> pd.Series:
         """Re-derive the macro composite score (same logic as MacroRegimeStrategy)."""
         p = self._macro
         spy     = close["SPY"]
         spy_ret = returns["SPY"]
+
+        signal_close = kwargs.get("signal_close")
+        if signal_close is None:
+            etf_cols     = {"SPY", "QQQ"}
+            signal_close = close[[c for c in close.columns if c not in etf_cols]]
+
         components = [
             p._vix_proxy(spy_ret),
             p._equity_momentum(spy),
-            p._market_breadth(close),
+            p._market_breadth(signal_close),
             p._vol_regime(spy_ret),
-            p._cross_momentum(close),
+            p._cross_momentum(signal_close),
         ]
         return (
             pd.concat(components, axis=1)
@@ -66,7 +72,7 @@ class LuckyMacroRegimeStrategy(BaseStrategy):
             return pd.DataFrame(0.0, index=close.index, columns=close.columns)
 
         seed      = self.params.get("seed", 99)
-        composite = self._composite(close, returns)
+        composite = self._composite(close, returns, **kwargs)
         risk_on   = composite > 0
 
         rng    = np.random.default_rng(seed)

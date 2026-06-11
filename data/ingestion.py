@@ -26,7 +26,7 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from config.client import get_data_client
 from config.settings import (
-    UNIVERSE, BACKTEST_START, BACKTEST_END,
+    UNIVERSE, SIGNAL_UNIVERSE, BACKTEST_START, BACKTEST_END,
     DATA_DIR, CACHE_EXPIRY_HOURS,
 )
 
@@ -108,6 +108,22 @@ def get_universe_ohlcv(use_cache: bool = True) -> dict[str, pd.DataFrame]:
 
     logger.info(f"Universe loaded: {len(universe_data)}/{len(UNIVERSE)} symbols")
     return universe_data
+
+
+def get_signal_ohlcv(use_cache: bool = True) -> dict[str, pd.DataFrame]:
+    """Fetch OHLCV for SIGNAL_UNIVERSE symbols not already in UNIVERSE."""
+    signal_only = [s for s in SIGNAL_UNIVERSE if s not in UNIVERSE]
+    data = {}
+    for sym in signal_only:
+        try:
+            df = get_ohlcv(sym, use_cache=use_cache)
+            if not df.empty:
+                data[sym] = df
+        except Exception as e:
+            logger.error(f"Failed to fetch signal symbol {sym}: {e}")
+        time.sleep(0.1)
+    logger.info(f"Signal universe extra symbols: {len(data)}/{len(signal_only)} fetched")
+    return data
 
 
 def build_close_matrix(universe_data: dict[str, pd.DataFrame]) -> pd.DataFrame:

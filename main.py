@@ -49,9 +49,9 @@ sys.path.insert(0, project_root)
 import pandas as pd
 from loguru import logger
 
-from config.settings import RESULT_DIR, PAPER_TRADING, PORTFOLIO_TYPE, PORTFOLIO_PARAMS
+from config.settings import RESULT_DIR, PAPER_TRADING, PORTFOLIO_TYPE, PORTFOLIO_PARAMS, SIGNAL_UNIVERSE
 from config.client import check_connectivity
-from data.ingestion import get_universe_ohlcv, build_close_matrix, build_return_matrix
+from data.ingestion import get_universe_ohlcv, get_signal_ohlcv, build_close_matrix, build_return_matrix
 from strategies import get_all_strategies
 from backtest.engine import (
     run_all_backtests, run_portfolio_comparison, run_all_backtests_with_splits,
@@ -171,7 +171,14 @@ def run_backtest_pipeline(
     low_df        = pd.DataFrame({s: universe_data[s]["low"]    for s in universe_data})
     volume_df     = pd.DataFrame({s: universe_data[s]["volume"] for s in universe_data})
 
+    # Broader signal universe for MacroRegime breadth/cross-momentum.
+    # Fetches only the symbols not already in UNIVERSE (avoids duplicate fetches).
+    signal_data  = get_signal_ohlcv(use_cache=use_cache)
+    all_data     = {**universe_data, **signal_data}
+    signal_close = build_close_matrix({s: all_data[s] for s in SIGNAL_UNIVERSE if s in all_data})
+
     logger.info(f"Universe: {list(universe_data.keys())}")
+    logger.info(f"Signal universe: {signal_close.shape[1]} symbols")
     logger.info(f"Date range: {close.index[0].date()} → {close.index[-1].date()}")
     logger.info(f"Total bars: {len(close)}")
 
@@ -183,11 +190,12 @@ def run_backtest_pipeline(
     for strategy in strategies:
         logger.info(f"  → {strategy.name}")
         signals_dict[strategy.name] = strategy.run(
-            close   = close,
-            returns = returns,
-            high    = high_df,
-            low     = low_df,
-            volume  = volume_df,
+            close        = close,
+            returns      = returns,
+            high         = high_df,
+            low          = low_df,
+            volume       = volume_df,
+            signal_close = signal_close,
         )
 
     # ── 3. Backtest ────────────────────────────────────────────────────────────

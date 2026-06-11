@@ -110,7 +110,7 @@ class MacroRegimeStrategy(BaseStrategy):
         self,
         close:   pd.DataFrame,
         returns: pd.DataFrame,
-        **_kwargs,
+        **kwargs,
     ) -> pd.DataFrame:
         if "SPY" not in close.columns:
             logger.warning("MacroRegimeStrategy: SPY not in universe — returning flat")
@@ -119,12 +119,21 @@ class MacroRegimeStrategy(BaseStrategy):
         spy     = close["SPY"]
         spy_ret = returns["SPY"]
 
+        # Use the broader SIGNAL_UNIVERSE close matrix for breadth and cross-momentum
+        # if provided, otherwise fall back to trading universe minus ETF indices.
+        # SPY/QQQ are market-cap-weighted aggregates of the other 10 names — using
+        # them in breadth/momentum produces a self-referential echo, not real signal.
+        signal_close = kwargs.get("signal_close")
+        if signal_close is None:
+            etf_cols     = {"SPY", "QQQ"}
+            signal_close = close[[c for c in close.columns if c not in etf_cols]]
+
         components = [
             self._vix_proxy(spy_ret),
             self._equity_momentum(spy),
-            self._market_breadth(close),
+            self._market_breadth(signal_close),
             self._vol_regime(spy_ret),
-            self._cross_momentum(close),
+            self._cross_momentum(signal_close),
         ]
 
         composite = (

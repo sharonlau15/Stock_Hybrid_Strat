@@ -32,13 +32,13 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from config.client import get_trading_client
 from config.settings import (
-    UNIVERSE, PORTFOLIO_USD, MIN_ORDER_USD, PAPER_TRADING,
+    UNIVERSE, SIGNAL_UNIVERSE, PORTFOLIO_USD, MIN_ORDER_USD, PAPER_TRADING,
     RESULT_DIR, STOP_LOSS_PCT, TAKE_PROFIT_PCT,
     TRAILING_STOP_PCT, USE_TRAILING_STOP,
     PRICE_MONITOR_SECS,
     REBALANCE_THRESHOLD, MAX_LIVE_POSITIONS, MAX_POSITION_SIZE,
 )
-from data.ingestion import get_universe_ohlcv, build_close_matrix, build_return_matrix
+from data.ingestion import get_universe_ohlcv, get_signal_ohlcv, build_close_matrix, build_return_matrix
 from utils.logger import setup_logger
 from db.state import (
     load_state,
@@ -350,6 +350,10 @@ def signal_rebalance_job(strategies: list, signals_dict: dict):
         returns = build_return_matrix(close)
         high_df = pd.DataFrame({s: universe_data[s]["high"] for s in universe_data})
         low_df  = pd.DataFrame({s: universe_data[s]["low"]  for s in universe_data})
+
+        signal_data  = get_signal_ohlcv(use_cache=False)
+        all_data     = {**universe_data, **signal_data}
+        signal_close = build_close_matrix({s: all_data[s] for s in SIGNAL_UNIVERSE if s in all_data})
     except Exception as e:
         logger.error(f"Data fetch failed — skipping cycle: {e}")
         return
@@ -359,6 +363,7 @@ def signal_rebalance_job(strategies: list, signals_dict: dict):
         try:
             signals_dict[strategy.name] = strategy.run(
                 close=close, returns=returns, high=high_df, low=low_df,
+                signal_close=signal_close,
             )
         except Exception as e:
             logger.error(f"Signal failed for {strategy.name}: {e}")
