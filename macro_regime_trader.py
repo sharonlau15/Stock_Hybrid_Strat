@@ -76,11 +76,15 @@ for _d in [DATA_DIR, LOG_DIR, RESULT_DIR]:
 
 # ── Universes ─────────────────────────────────────────────────────────────────
 
-# Tickers we actually trade (12 liquid names including ETFs as hedges)
+# Tickers we actually trade — 10 independent stocks only.
+# SPY and QQQ are excluded: risk parity assigns them the highest weights
+# (lowest vol → highest 1/vol) while they mechanically hold the same AAPL/
+# MSFT/NVDA names already in the book, creating silent double-exposure that
+# risk parity cannot see because it works per-symbol, not look-through.
+# SPY is kept as MARKET_PROXY for signal computation (fetched but not traded).
 TRADE_UNIVERSE = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
     "META", "JPM",  "JNJ",   "XOM",  "UNH",
-    "SPY",  "QQQ",
 ]
 
 # Broader cross-section used ONLY for computing breadth and cross-momentum.
@@ -109,8 +113,8 @@ SIGNAL_UNIVERSE = [
 
 MARKET_PROXY = "SPY"   # used for VIX proxy, trend MA, vol regime
 
-# All symbols to fetch (union of trade + signal, deduplicated)
-ALL_SYMBOLS = sorted(set(TRADE_UNIVERSE) | set(SIGNAL_UNIVERSE))
+# All symbols to fetch: trade + signal + market proxy (SPY is not in either list now)
+ALL_SYMBOLS = sorted(set(TRADE_UNIVERSE) | set(SIGNAL_UNIVERSE) | {MARKET_PROXY})
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 BACKTEST_START     = "2022-01-01"
@@ -356,6 +360,16 @@ def risk_parity_weights(ret_window: pd.DataFrame, symbols: list) -> pd.Series:
         if under.any() and w[under].sum() > 0:
             w[under] = w[under] / w[under].sum() * remaining
 
+    # Final renormalization: capping loop may not fully converge when many
+    # names hit the cap simultaneously. Without this, weights silently sum
+    # to < 1 causing unintended cash drag with no log entry.
+    total = w.sum()
+    if total > 1e-9:
+        w = w / total
+    else:
+        logger.warning("risk_parity_weights: all weights zero — returning equal weight")
+        w[:] = 1.0 / len(avail)
+
     return w.reindex(symbols, fill_value=0.0)
 
 
@@ -378,10 +392,21 @@ def run_backtest(use_cache: bool = True) -> dict:
     scale = ((composite + 1.0) / 2.0).clip(0.0, 1.0)
 
     risk_on_frac = (composite > 0).mean()
+    flat_days    = int((scale < 0.05).sum())
     logger.info(
         f"Composite [{composite.min():.2f}, {composite.max():.2f}] "
         f"| risk-on {risk_on_frac:.0%} of days"
     )
+    logger.info(
+        f"Scale  min={scale.min():.3f}  max={scale.max():.3f}  mean={scale.mean():.3f}"
+        f"  |  flat days (sc<0.05): {flat_days}/{len(scale)} ({flat_days/len(scale):.1%})"
+    )
+    if scale.min() > 0.30:
+        logger.warning(
+            f"Scale never drops below {scale.min():.2f} — the macro overlay is acting "
+            "as a constant ~{scale.mean():.0%} multiplier, not a true risk-on/off gate. "
+            "Consider whether the composite thresholds need recalibration."
+        )
 
     tradeable = [s for s in TRADE_UNIVERSE if s in close.columns]
     dates     = close.index
@@ -643,7 +668,18 @@ def signal_rebalance_job():
 
     state  = _load_state()
     prices = _fetch_live_prices()
-    nav    = _compute_nav(state, prices)
+
+    # If any tradeable symbol has no price, prev_w would treat its position as
+    # zero — triggering a ghost buy on top of an existing holding. Abort instead.
+    missing_prices = [s for s in tradeable if s not in prices]
+    if missing_prices:
+        logger.error(
+            f"Price fetch incomplete — missing {missing_prices}. "
+            "Skipping rebalance to avoid ghost buys on stale weights."
+        )
+        return
+
+    nav = _compute_nav(state, prices)
 
     if nav <= 0:
         logger.warning("NAV is zero — skipping rebalance")
