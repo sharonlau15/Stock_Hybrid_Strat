@@ -1,63 +1,362 @@
 """
-macro_regime_trader.py
-======================
-Standalone Macro Regime-only trading machine.
+macro_regime_trader.py  (v2 — standalone)
+==========================================
+Macro Regime-only trading machine. Zero imports from the rest of the project.
+All config, strategy logic, portfolio construction, and execution are in this file.
 
-Completely independent from the main multi-strategy engine.
-Uses its own state file, log file, and scheduler.
-Shares Alpaca credentials and universe from config/.
+Changes from v1
+---------------
+- Fully standalone: no imports from config/, strategies/, portfolio/, data/
+- SIGNAL_UNIVERSE: 22 independent stocks across all 11 GICS sectors (no ETFs)
+  so breadth/cross-momentum are genuine cross-sectional signals, not an
+  echo chamber of 10 tech-heavy names + 2 indices that mechanically track them
+- Portfolio: risk parity (inverse vol) — no matrix inversion, stable weights
+  max-Sharpe on a uniform-signal, highly-correlated 12-name universe was
+  latching onto covariance noise and producing unstable concentrated bets
+- No stop-loss / no trailing stop — macro composite handles de-risking
+  position-level stops fought the strategy's own signal (double de-risking)
+  kept: 15% hard stop as a circuit breaker for catastrophic single-stock events
+- Dead-code fix: backtest and live now use the same risk_parity_weights()
+  v1 computed MaxSharpe weights then immediately overwrote with _signal_to_weights
+- MAX_POSITION_SIZE: 0.15 (down from 0.20) for better concentration control
 
 Usage
 -----
-  python macro_regime_trader.py --mode backtest   # backtest only, print results
-  python macro_regime_trader.py --mode live       # live trading only
-  python macro_regime_trader.py --mode full       # backtest → if Sharpe > 0.5 → go live
+  python macro_regime_trader.py --mode backtest
+  python macro_regime_trader.py --mode live
+  python macro_regime_trader.py --mode full --run-now   # backtest → live if Sharpe ≥ 0.5
 """
 
 import sys
+import os
 import json
 import time
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
-
 import numpy as np
 import pandas as pd
 from loguru import logger
+from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
-
-import os
-from config.settings import (
-    UNIVERSE, PORTFOLIO_USD, MIN_ORDER_USD,
-    PAPER_TRADING, RESULT_DIR, LOG_DIR,
-    STOP_LOSS_PCT, TAKE_PROFIT_PCT,
-    TRAILING_STOP_PCT, USE_TRAILING_STOP,
-    PRICE_MONITOR_SECS, REBALANCE_THRESHOLD,
-    MAX_LIVE_POSITIONS, MAX_POSITION_SIZE,
-    BACKTEST_START, RISK_LOOKBACK_DAYS, TRADING_DAYS,
-)
-from data.ingestion import get_universe_ohlcv, build_close_matrix, build_return_matrix
-from strategies.macro_regime import MacroRegimeStrategy
-from portfolio.max_sharpe import MaxSharpePortfolio
+from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest, StockLatestTradeRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-# ── Paths ──────────────────────────────────────────────────────────────────────
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+ROOT_DIR = Path(__file__).resolve().parent
+
+for _env in [ROOT_DIR / "Alpaca.env", ROOT_DIR / ".env"]:
+    if _env.exists():
+        load_dotenv(_env)
+        break
+
+# Dedicated MR paper-trading Alpaca account
+API_KEY    = os.getenv("ALPACA_PAPER_API_KEY_MR")
+API_SECRET = os.getenv("ALPACA_PAPER_API_SECRET_MR")
+PAPER      = True   # flip to False only for real money
+
+# Paths — own cache directory so it doesn't collide with the main engine
+DATA_DIR   = ROOT_DIR / "data" / "mr_cache"
+LOG_DIR    = ROOT_DIR / "logs"
+RESULT_DIR = ROOT_DIR / "results"
 STATE_FILE = RESULT_DIR / "macro_live_state.json"
 LOG_FILE   = LOG_DIR   / "macro_engine.log"
 
-# ── Logger ─────────────────────────────────────────────────────────────────────
+for _d in [DATA_DIR, LOG_DIR, RESULT_DIR]:
+    _d.mkdir(parents=True, exist_ok=True)
 
-def _setup_logger():
-    logger.remove()
-    logger.add(sys.stderr,  level="INFO",
-               format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}")
-    logger.add(LOG_FILE,    level="DEBUG", rotation="1 week",
-               format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {message}")
+# ── Universes ─────────────────────────────────────────────────────────────────
+
+# Tickers we actually trade (12 liquid names including ETFs as hedges)
+TRADE_UNIVERSE = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
+    "META", "JPM",  "JNJ",   "XOM",  "UNH",
+    "SPY",  "QQQ",
+]
+
+# Broader cross-section used ONLY for computing breadth and cross-momentum.
+# No ETF indices — we want independent stock observations across all sectors.
+# With 22 names covering all 11 GICS sectors the breadth signal is genuine;
+# using the 10-12 name trading universe (half of which are correlated tech)
+# produces an echo-chamber reading that isn't real breadth.
+SIGNAL_UNIVERSE = [
+    # Technology (6)
+    "AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN",
+    # Financials (3)
+    "JPM",  "BAC",  "GS",
+    # Healthcare (3)
+    "JNJ",  "UNH",  "PFE",
+    # Energy (2)
+    "XOM",  "CVX",
+    # Consumer Discretionary (2)
+    "HD",   "MCD",
+    # Consumer Staples (2)
+    "WMT",  "PG",
+    # Industrials (2)
+    "CAT",  "HON",
+    # Utilities / Materials (2)
+    "NEE",  "LIN",
+]
+
+MARKET_PROXY = "SPY"   # used for VIX proxy, trend MA, vol regime
+
+# All symbols to fetch (union of trade + signal, deduplicated)
+ALL_SYMBOLS = sorted(set(TRADE_UNIVERSE) | set(SIGNAL_UNIVERSE))
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+BACKTEST_START     = "2022-01-01"
+CACHE_EXPIRY_HOURS = 6
+
+# ── Macro signal parameters ───────────────────────────────────────────────────
+VIX_PROXY_WINDOW = 20    # SPY rolling vol window (days)
+VIX_RISK_ON      = 20    # annualised vol % < this → risk-on  (+1)
+VIX_RISK_OFF     = 30    # annualised vol % ≥ this → risk-off (−1)
+MA_LONG          = 200   # SPY trend MA period
+BREADTH_MA       = 50    # per-stock MA for breadth calc
+BREADTH_ON       = 0.60  # > 60% of SIGNAL_UNIVERSE above MA → risk-on
+BREADTH_OFF      = 0.40  # < 40% → risk-off
+VOL_SHORT        = 10    # short vol window (stress detection)
+VOL_LONG         = 30    # long vol window
+MOM_LONG         = 252   # 12-month momentum lookback
+MOM_SKIP         = 21    # skip most-recent month (reversal avoidance)
+
+# ── Portfolio ─────────────────────────────────────────────────────────────────
+TRADING_DAYS       = 252
+RISK_LOOKBACK_DAYS = 126    # 6-month rolling vol estimate
+VOL_FLOOR          = 0.03   # 3% annualised vol floor (prevents extreme weights)
+MAX_POSITION_SIZE  = 0.15   # 15% single-name cap (down from 20%)
+MAX_LIVE_POSITIONS = 8
+
+# ── Execution ─────────────────────────────────────────────────────────────────
+PORTFOLIO_USD       = 100_000   # matches MR paper account starting equity
+MIN_ORDER_USD       = 1.0
+REBALANCE_THRESHOLD = 0.03
+
+# ── Risk management ───────────────────────────────────────────────────────────
+# Stop-loss and trailing stop are intentionally disabled.
+# The macro composite itself handles de-risking: when the regime flips to
+# risk-off the rebalance job targets zero exposure. Layering a 5%/7% stop
+# on top causes double de-risking and whipsaw re-entries.
+# A 15% hard stop remains as a circuit breaker for catastrophic single events.
+HARD_STOP_PCT      = 0.15
+USE_TRAILING_STOP  = False
+PRICE_MONITOR_SECS = 60
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ALPACA CLIENTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _trading_client() -> TradingClient:
+    if not API_KEY or not API_SECRET:
+        raise RuntimeError(
+            "ALPACA_PAPER_API_KEY_MR / ALPACA_PAPER_API_SECRET_MR not set in env"
+        )
+    return TradingClient(API_KEY, API_SECRET, paper=PAPER)
+
+
+def _data_client() -> StockHistoricalDataClient:
+    if not API_KEY or not API_SECRET:
+        raise RuntimeError(
+            "ALPACA_PAPER_API_KEY_MR / ALPACA_PAPER_API_SECRET_MR not set in env"
+        )
+    return StockHistoricalDataClient(API_KEY, API_SECRET)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DATA FETCHING — own cache under data/mr_cache/
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _cache_path(symbol: str) -> Path:
+    return DATA_DIR / f"{symbol}_1Day.parquet"
+
+
+def _cache_fresh(path: Path) -> bool:
+    if not path.exists():
+        return False
+    return (time.time() - path.stat().st_mtime) / 3600 < CACHE_EXPIRY_HOURS
+
+
+def _fetch_one(symbol: str, use_cache: bool = True) -> pd.DataFrame:
+    path = _cache_path(symbol)
+    if use_cache and _cache_fresh(path):
+        logger.debug(f"Cache hit: {symbol}")
+        return pd.read_parquet(path)
+
+    logger.info(f"Fetching {symbol}…")
+    end_dt = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    req = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=TimeFrame(1, TimeFrameUnit.Day),
+        start=BACKTEST_START,
+        end=end_dt,
+        adjustment="all",
+    )
+    bars = _data_client().get_stock_bars(req)
+    df   = bars.df
+    if df.empty:
+        logger.warning(f"No data for {symbol}")
+        return pd.DataFrame()
+
+    if isinstance(df.index, pd.MultiIndex):
+        df = df.xs(symbol, level="symbol")
+    df.index = pd.to_datetime(df.index, utc=True).normalize()
+    df = df[["open", "high", "low", "close", "volume"]].sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    df.to_parquet(path)
+    return df
+
+
+def fetch_all(use_cache: bool = True) -> dict:
+    """Fetch TRADE_UNIVERSE ∪ SIGNAL_UNIVERSE."""
+    data = {}
+    for sym in ALL_SYMBOLS:
+        try:
+            df = _fetch_one(sym, use_cache=use_cache)
+            if not df.empty:
+                data[sym] = df
+        except Exception as e:
+            logger.error(f"Failed {sym}: {e}")
+        time.sleep(0.05)
+    logger.info(f"Fetched {len(data)}/{len(ALL_SYMBOLS)} symbols")
+    return data
+
+
+def _close_matrix(data: dict) -> pd.DataFrame:
+    return (
+        pd.DataFrame({s: data[s]["close"] for s in data})
+        .sort_index()
+        .ffill()
+        .dropna(how="all")
+    )
+
+
+def _ret_matrix(close: pd.DataFrame) -> pd.DataFrame:
+    return np.log(close / close.shift(1)).dropna(how="all")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MACRO REGIME SIGNAL
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _vix_proxy(spy_ret: pd.Series) -> pd.Series:
+    """SPY realised vol scaled to approximate VIX units."""
+    vol = spy_ret.rolling(VIX_PROXY_WINDOW).std() * np.sqrt(252) * 100
+    sig = pd.Series(0.0, index=spy_ret.index)
+    sig[vol < VIX_RISK_ON]   =  1.0
+    sig[vol >= VIX_RISK_OFF] = -1.0
+    return sig.rename("vix_proxy")
+
+
+def _equity_momentum(spy: pd.Series) -> pd.Series:
+    """SPY above/below 200-day MA."""
+    ma = spy.rolling(MA_LONG, min_periods=MA_LONG // 2).mean()
+    return np.sign(spy - ma).rename("equity_mom")
+
+
+def _market_breadth(signal_close: pd.DataFrame) -> pd.Series:
+    """
+    Fraction of SIGNAL_UNIVERSE stocks above their 50-day MA.
+    Uses 22 independent names across all sectors — no ETFs — so this
+    is a genuine breadth reading rather than an echo of the trading universe.
+    """
+    ma      = signal_close.rolling(BREADTH_MA, min_periods=BREADTH_MA // 2).mean()
+    above   = (signal_close > ma).astype(float)
+    breadth = above.mean(axis=1)
+    sig     = pd.Series(0.0, index=signal_close.index)
+    sig[breadth >= BREADTH_ON]  =  1.0
+    sig[breadth <= BREADTH_OFF] = -1.0
+    return sig.rename("breadth")
+
+
+def _vol_regime(spy_ret: pd.Series) -> pd.Series:
+    """Short-term vol expanding above long-term → stress signal."""
+    v_short = spy_ret.rolling(VOL_SHORT).std()
+    v_long  = spy_ret.rolling(VOL_LONG).std()
+    return np.sign(v_long - v_short).rename("vol_regime")   # +1 = contracting = good
+
+
+def _cross_momentum(signal_close: pd.DataFrame) -> pd.Series:
+    """
+    Average 12-1 month momentum across SIGNAL_UNIVERSE (no ETFs).
+    Positive average → broad momentum tailwind.
+    """
+    score = signal_close.shift(MOM_SKIP) / signal_close.shift(MOM_LONG) - 1
+    avg   = score.mean(axis=1)
+    return np.sign(avg).rename("cross_mom")
+
+
+def compute_composite(close: pd.DataFrame) -> pd.Series:
+    """
+    5-indicator macro composite over time.
+
+    SPY is used only for VIX proxy, trend MA, and vol regime.
+    Breadth and cross-momentum use SIGNAL_UNIVERSE (22 independent stocks).
+    Returns series in [-1, +1].
+    """
+    spy     = close[MARKET_PROXY]
+    spy_ret = np.log(spy / spy.shift(1))
+
+    sig_cols     = [s for s in SIGNAL_UNIVERSE if s in close.columns]
+    signal_close = close[sig_cols]
+
+    components = [
+        _vix_proxy(spy_ret),
+        _equity_momentum(spy),
+        _market_breadth(signal_close),
+        _vol_regime(spy_ret),
+        _cross_momentum(signal_close),
+    ]
+    composite = (
+        pd.concat(components, axis=1)
+        .mean(axis=1)
+        .clip(-1.0, 1.0)
+        .reindex(close.index)
+        .fillna(0.0)
+    )
+    return composite
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PORTFOLIO — risk parity (inverse vol)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def risk_parity_weights(ret_window: pd.DataFrame, symbols: list) -> pd.Series:
+    """
+    Inverse-volatility risk parity, capped at MAX_POSITION_SIZE.
+
+    Chosen over max-Sharpe because:
+    - No matrix inversion → no instability from near-singular covariance
+    - Macro composite gives uniform expected returns per ticker, so
+      max-Sharpe degenerates to minimum-variance via noisy matrix inverse
+    - Inverse-vol achieves similar risk diversification more robustly
+    """
+    avail = [s for s in symbols if s in ret_window.columns]
+    vol   = ret_window[avail].std() * np.sqrt(TRADING_DAYS)
+    vol   = vol.clip(lower=VOL_FLOOR)
+    w     = 1.0 / vol
+    w     = w / w.sum()
+
+    for _ in range(20):
+        over = w > MAX_POSITION_SIZE
+        if not over.any():
+            break
+        w[over] = MAX_POSITION_SIZE
+        remaining = 1.0 - w[over].sum()
+        under     = ~over
+        if under.any() and w[under].sum() > 0:
+            w[under] = w[under] / w[under].sum() * remaining
+
+    return w.reindex(symbols, fill_value=0.0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -65,107 +364,86 @@ def _setup_logger():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_backtest(use_cache: bool = True) -> dict:
-    """
-    Run a walk-forward backtest using only MacroRegimeStrategy.
-    Returns a dict of key performance metrics and prints a summary.
-    """
     logger.info("=" * 60)
-    logger.info("MACRO REGIME TRADER — BACKTEST")
+    logger.info("MACRO REGIME TRADER v2 — BACKTEST")
     logger.info("=" * 60)
 
-    # ── Data ──────────────────────────────────────────────────────────────────
-    logger.info("Loading universe data…")
-    universe_data = get_universe_ohlcv(use_cache=use_cache)
-    close   = build_close_matrix(universe_data)
-    returns = build_return_matrix(close)
-    high_df = pd.DataFrame({s: universe_data[s]["high"] for s in universe_data})
-    low_df  = pd.DataFrame({s: universe_data[s]["low"]  for s in universe_data})
+    data    = fetch_all(use_cache=use_cache)
+    close   = _close_matrix(data)
+    returns = _ret_matrix(close)
 
-    # ── Signals ───────────────────────────────────────────────────────────────
-    logger.info("Generating MacroRegime signals…")
-    strategy = MacroRegimeStrategy()
-    signals  = strategy.run(close=close, returns=returns,
-                             high=high_df, low=low_df)
+    logger.info("Computing macro composite…")
+    composite = compute_composite(close)
+    # Map [-1, +1] → [0, 1]: full risk-off = cash, neutral = half, full risk-on = full
+    scale = ((composite + 1.0) / 2.0).clip(0.0, 1.0)
 
-    # ── Walk-forward backtest ─────────────────────────────────────────────────
+    risk_on_frac = (composite > 0).mean()
+    logger.info(
+        f"Composite [{composite.min():.2f}, {composite.max():.2f}] "
+        f"| risk-on {risk_on_frac:.0%} of days"
+    )
+
+    tradeable = [s for s in TRADE_UNIVERSE if s in close.columns]
+    dates     = close.index
+    wh        = pd.DataFrame(0.0, index=dates, columns=tradeable)
+
     logger.info("Running walk-forward backtest…")
-    portfolio   = MaxSharpePortfolio()
-    dates       = signals.index
-    wh          = pd.DataFrame(0.0, index=dates, columns=UNIVERSE)
-
-    for i, dt in enumerate(dates):
-        if i < RISK_LOOKBACK_DAYS:
+    for i in range(RISK_LOOKBACK_DAYS, len(dates)):
+        sc = float(scale.iloc[i])
+        if sc < 0.05:
             continue
-        cov = (
-            returns.loc[:dt]
-            .iloc[-RISK_LOOKBACK_DAYS:]
-            .cov() * TRADING_DAYS
-        )
-        sig_row = signals.loc[dt]
-        try:
-            w = portfolio.compute_weights(sig_row, cov, long_short=False)
-            for sym, weight in w.items():
-                wh.loc[dt, sym] = weight
-        except Exception:
-            wh.loc[dt] = wh.iloc[i - 1]
+        ret_window = returns[tradeable].iloc[i - RISK_LOOKBACK_DAYS : i]
+        base_w     = risk_parity_weights(ret_window, tradeable)
+        wh.iloc[i] = base_w * sc
 
-    fwd     = returns.shift(-1)
-    port_r  = (wh * fwd).sum(axis=1).iloc[RISK_LOOKBACK_DAYS:-1]
-    port_r  = port_r.dropna()
+    fwd    = returns[tradeable].shift(-1)
+    port_r = (wh * fwd).sum(axis=1).iloc[RISK_LOOKBACK_DAYS:-1].dropna()
 
-    # ── Metrics ───────────────────────────────────────────────────────────────
-    n          = len(port_r)
-    ann_ret    = float(port_r.mean() * TRADING_DAYS)
-    ann_vol    = float(port_r.std()  * np.sqrt(TRADING_DAYS))
-    sharpe     = ann_ret / ann_vol if ann_vol > 0 else 0.0
-    cum        = (1 + port_r).cumprod()
-    total_ret  = float(cum.iloc[-1] - 1) if len(cum) else 0.0
-    roll_max   = cum.cummax()
-    drawdown   = (cum - roll_max) / roll_max
-    max_dd     = float(drawdown.min())
-    calmar     = ann_ret / abs(max_dd) if max_dd < 0 else 0.0
-    wins       = (port_r > 0).sum()
-    win_rate   = float(wins / n) if n else 0.0
-    final_cap  = PORTFOLIO_USD * (1 + total_ret)
-
-    years      = n / TRADING_DAYS
-    cagr       = float((1 + total_ret) ** (1 / years) - 1) if years > 0 else 0.0
+    n         = len(port_r)
+    ann_ret   = float(port_r.mean() * TRADING_DAYS)
+    ann_vol   = float(port_r.std()  * np.sqrt(TRADING_DAYS))
+    sharpe    = ann_ret / ann_vol if ann_vol > 0 else 0.0
+    cum       = (1 + port_r).cumprod()
+    total_ret = float(cum.iloc[-1] - 1) if len(cum) else 0.0
+    roll_max  = cum.cummax()
+    max_dd    = float(((cum - roll_max) / roll_max).min())
+    calmar    = ann_ret / abs(max_dd) if max_dd < 0 else 0.0
+    win_rate  = float((port_r > 0).sum() / n) if n else 0.0
+    years     = n / TRADING_DAYS
+    cagr      = float((1 + total_ret) ** (1 / years) - 1) if years > 0 else 0.0
+    final_cap = PORTFOLIO_USD * (1 + total_ret)
 
     metrics = {
-        "sharpe":      round(sharpe,    3),
-        "calmar":      round(calmar,    3),
-        "cagr":        round(cagr,      4),
-        "total_return":round(total_ret, 4),
-        "max_drawdown":round(max_dd,    4),
-        "annual_vol":  round(ann_vol,   4),
-        "win_rate":    round(win_rate,  4),
-        "final_capital":round(final_cap, 2),
-        "n_days":      n,
+        "sharpe":        round(sharpe,    3),
+        "calmar":        round(calmar,    3),
+        "cagr":          round(cagr,      4),
+        "total_return":  round(total_ret, 4),
+        "max_drawdown":  round(max_dd,    4),
+        "annual_vol":    round(ann_vol,   4),
+        "win_rate":      round(win_rate,  4),
+        "final_capital": round(final_cap, 2),
+        "n_days":        n,
     }
 
-    # ── Print summary ─────────────────────────────────────────────────────────
     logger.info("=" * 60)
-    logger.info("BACKTEST RESULTS — Macro Regime (MaxSharpe portfolio)")
-    logger.info(f"  Period       : {port_r.index[0].date()} → {port_r.index[-1].date()}")
-    logger.info(f"  Trading days : {n}")
-    logger.info(f"  Sharpe       : {sharpe:.3f}")
-    logger.info(f"  Calmar       : {calmar:.3f}")
-    logger.info(f"  CAGR         : {cagr*100:.2f}%")
-    logger.info(f"  Total Return : {total_ret*100:.2f}%")
-    logger.info(f"  Max Drawdown : {max_dd*100:.2f}%")
-    logger.info(f"  Annual Vol   : {ann_vol*100:.2f}%")
-    logger.info(f"  Win Rate     : {win_rate*100:.1f}%")
-    logger.info(f"  Final Capital: ${final_cap:,.2f}  (start ${PORTFOLIO_USD:,})")
+    logger.info("BACKTEST RESULTS — Macro Regime v2 (risk parity portfolio)")
+    logger.info(f"  Period        : {port_r.index[0].date()} → {port_r.index[-1].date()}")
+    logger.info(f"  Trading days  : {n}")
+    logger.info(f"  Sharpe        : {sharpe:.3f}")
+    logger.info(f"  Calmar        : {calmar:.3f}")
+    logger.info(f"  CAGR          : {cagr*100:.2f}%")
+    logger.info(f"  Total Return  : {total_ret*100:.2f}%")
+    logger.info(f"  Max Drawdown  : {max_dd*100:.2f}%")
+    logger.info(f"  Annual Vol    : {ann_vol*100:.2f}%")
+    logger.info(f"  Win Rate      : {win_rate*100:.1f}%")
+    logger.info(f"  Final Capital : ${final_cap:,.2f}  (start ${PORTFOLIO_USD:,})")
     logger.info("=" * 60)
-
-    # Save latest signals for live engine warm-up
-    (RESULT_DIR / "macro_signals_latest.csv").open("w").write(signals.tail(5).to_csv())
 
     return metrics
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STATE  (JSON-backed, independent from main engine's DB state)
+# STATE — JSON-backed, independent from main engine
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _load_state() -> dict:
@@ -173,58 +451,36 @@ def _load_state() -> dict:
         with open(STATE_FILE) as f:
             return json.load(f)
     return {
-        "positions":       {sym: 0.0 for sym in UNIVERSE},
-        "cash_usd":        float(PORTFOLIO_USD),
-        "current_weights": {},
-        "last_run":        None,
-        "nav_history":     [],
-        "trade_log":       [],
-        "position_entries":{},
+        "positions":        {sym: 0.0 for sym in TRADE_UNIVERSE},
+        "cash_usd":         float(PORTFOLIO_USD),
+        "current_weights":  {},
+        "last_run":         None,
+        "nav_history":      [],
+        "trade_log":        [],
+        "position_entries": {},
     }
 
 
 def _save_state(state: dict):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2, default=str)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LIVE ENGINE — helpers (mirror of live_engine.py but macro-only)
+# LIVE ENGINE — helpers
 # ══════════════════════════════════════════════════════════════════════════════
-
-def _mr_keys() -> tuple[str, str]:
-    """Return the Macro Regime-specific paper API key and secret."""
-    key    = os.getenv("ALPACA_PAPER_API_KEY_MR")
-    secret = os.getenv("ALPACA_PAPER_API_SECRET_MR")
-    if not key or not secret:
-        raise RuntimeError(
-            "ALPACA_PAPER_API_KEY_MR / ALPACA_PAPER_API_SECRET_MR not set in env"
-        )
-    return key, secret
-
-
-def _get_mr_trading_client():
-    from alpaca.trading.client import TradingClient
-    key, secret = _mr_keys()
-    return TradingClient(key, secret, paper=True)
-
 
 def _market_is_open() -> bool:
     try:
-        return _get_mr_trading_client().get_clock().is_open
+        return _trading_client().get_clock().is_open
     except Exception:
         return False
 
 
-def _fetch_prices() -> dict:
-    from alpaca.data.historical import StockHistoricalDataClient
-    from alpaca.data.requests import StockLatestTradeRequest
-    key, secret = _mr_keys()
-    client = StockHistoricalDataClient(key, secret)
+def _fetch_live_prices() -> dict:
     try:
-        trades = client.get_stock_latest_trade(
-            StockLatestTradeRequest(symbol_or_symbols=UNIVERSE)
+        trades = _data_client().get_stock_latest_trade(
+            StockLatestTradeRequest(symbol_or_symbols=TRADE_UNIVERSE)
         )
         return {sym: float(t.price) for sym, t in trades.items()}
     except Exception as e:
@@ -240,42 +496,30 @@ def _compute_nav(state: dict, prices: dict) -> float:
     return nav
 
 
-def _check_exits(state: dict, prices: dict) -> dict:
+def _check_hard_stops(state: dict, prices: dict) -> dict:
+    """15% hard stop only — circuit breaker for catastrophic single-stock events."""
     exits   = {}
     entries = state.get("position_entries", {})
     for sym, qty in state["positions"].items():
         if qty == 0 or sym not in entries or sym not in prices:
             continue
-        ep   = entries[sym]["entry_price"]
-        cur  = prices[sym]
-        pct  = (cur - ep) / ep
-        if pct <= -STOP_LOSS_PCT:
-            exits[sym] = cur
-            logger.warning(f"[STOP LOSS]    {sym}  {pct*100:.2f}%")
-        elif pct >= TAKE_PROFIT_PCT:
-            exits[sym] = cur
-            logger.success(f"[TAKE PROFIT]  {sym} +{pct*100:.2f}%")
-        elif USE_TRAILING_STOP:
-            peak = entries[sym].get("peak_price", ep)
-            if cur > peak:
-                entries[sym]["peak_price"] = cur
-                peak = cur
-            dd = (peak - cur) / peak
-            if dd >= TRAILING_STOP_PCT:
-                exits[sym] = cur
-                logger.warning(f"[TRAILING STOP]{sym} -{dd*100:.2f}% from peak")
+        ep  = entries[sym]["entry_price"]
+        pct = (prices[sym] - ep) / ep
+        if pct <= -HARD_STOP_PCT:
+            exits[sym] = prices[sym]
+            logger.warning(f"[HARD STOP] {sym}  {pct*100:.2f}%  (15% circuit breaker)")
     return exits
 
 
 def _execute_exits(exits: dict, state: dict) -> dict:
-    client = _get_mr_trading_client()
+    client = _trading_client()
     for sym, price in exits.items():
         qty = state["positions"].get(sym, 0)
         if qty == 0:
             continue
         try:
-            # Use close_position so Alpaca closes exactly what it holds —
-            # avoids fractional qty mismatch between local state and Alpaca's fill record.
+            # close_position closes exactly what Alpaca holds — avoids
+            # fractional qty mismatch between local state and Alpaca's fill record
             order = client.close_position(sym)
             state["positions"][sym] = 0.0
             state["cash_usd"]      += qty * price
@@ -284,44 +528,24 @@ def _execute_exits(exits: dict, state: dict) -> dict:
                 "time": str(datetime.now(timezone.utc)),
                 "symbol": sym, "side": "SELL",
                 "qty": qty, "price": price,
-                "reason": "stop_tp", "order_id": str(order.id),
+                "reason": "hard_stop", "order_id": str(order.id),
             })
         except Exception as e:
             logger.error(f"Exit failed {sym}: {e}")
     return state
 
 
-def _signal_to_weights(sig: pd.Series) -> pd.Series:
-    w   = pd.Series(0.0, index=UNIVERSE)
-    pos = sig[sig > 0].nlargest(MAX_LIVE_POSITIONS)
-    if pos.empty:
-        return w
-    raw = pos / pos.sum()
-    for _ in range(20):
-        over = raw > MAX_POSITION_SIZE
-        if not over.any():
-            break
-        raw[over] = MAX_POSITION_SIZE
-        left = 1.0 - raw[over].sum()
-        unc  = ~over
-        if unc.any() and raw[unc].sum() > 0:
-            raw[unc] = raw[unc] / raw[unc].sum() * left
-    w[pos.index] = raw.clip(upper=MAX_POSITION_SIZE)
-    return w.reindex(UNIVERSE, fill_value=0)
-
-
-def _execute_rebalance(target_w: pd.Series, state: dict,
-                        nav: float, prices: dict) -> dict:
+def _execute_rebalance(target_w: dict, state: dict, nav: float, prices: dict) -> dict:
     if not _market_is_open():
         logger.warning("Market closed — skipping rebalance")
         return state
 
-    client   = _get_mr_trading_client()
-    cur_vals = {s: state["positions"].get(s, 0) * prices.get(s, 0) for s in UNIVERSE}
+    client   = _trading_client()
+    cur_vals = {s: state["positions"].get(s, 0) * prices.get(s, 0) for s in TRADE_UNIVERSE}
     cur_w    = {s: v / nav for s, v in cur_vals.items()} if nav > 0 else {}
 
     sells, buys = [], []
-    for sym in UNIVERSE:
+    for sym in TRADE_UNIVERSE:
         delta = target_w.get(sym, 0) - cur_w.get(sym, 0)
         usd   = delta * nav
         if abs(usd) < MIN_ORDER_USD:
@@ -339,29 +563,27 @@ def _execute_rebalance(target_w: pd.Series, state: dict,
                 symbol=sym, notional=round(abs(usd), 2),
                 side=side, time_in_force=TimeInForce.DAY,
             ))
-            filled_qty = qty
             if side == OrderSide.BUY:
-                state["positions"][sym] = state["positions"].get(sym, 0) + filled_qty
-                state["cash_usd"]      -= filled_qty * price
-                if state["positions"].get(sym, 0) == filled_qty:
+                state["positions"][sym] = state["positions"].get(sym, 0) + qty
+                state["cash_usd"]      -= qty * price
+                if sym not in state.get("position_entries", {}):
                     state.setdefault("position_entries", {})[sym] = {
                         "entry_price": price,
                         "entry_date":  str(datetime.now(timezone.utc)),
-                        "peak_price":  price,
                     }
             else:
-                new_qty = max(state["positions"].get(sym, 0) - filled_qty, 0)
+                new_qty = max(state["positions"].get(sym, 0) - qty, 0)
                 state["positions"][sym] = new_qty
-                state["cash_usd"]      += filled_qty * price
+                state["cash_usd"]      += qty * price
                 if new_qty == 0:
                     state.setdefault("position_entries", {}).pop(sym, None)
             state.setdefault("trade_log", []).append({
                 "time": str(datetime.now(timezone.utc)),
                 "symbol": sym, "side": side.value,
-                "qty": round(filled_qty, 4), "price": price,
+                "qty": round(qty, 4), "price": price,
                 "reason": "macro_rebalance", "order_id": str(order.id),
             })
-            logger.info(f"  {side.value:4s} {sym:5s}  qty={filled_qty:.3f}  @ ${price:.2f}")
+            logger.info(f"  {side.value:4s} {sym:5s}  qty={qty:.3f}  @ ${price:.2f}")
         except Exception as e:
             logger.error(f"Order failed {sym}: {e}")
 
@@ -369,76 +591,78 @@ def _execute_rebalance(target_w: pd.Series, state: dict,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LIVE ENGINE — scheduled jobs
+# SCHEDULED JOBS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def price_monitor_job():
-    """Check stop loss / trailing stop / take profit every PRICE_MONITOR_SECS."""
-    state = _load_state()
+    """Check 15% hard stop every PRICE_MONITOR_SECS seconds."""
+    state    = _load_state()
     open_pos = {s: q for s, q in state["positions"].items() if q != 0}
     if not open_pos:
         return
-
-    prices = _fetch_prices()
-    exits  = _check_exits(state, prices)
+    prices = _fetch_live_prices()
+    exits  = _check_hard_stops(state, prices)
     if exits:
         state = _execute_exits(exits, state)
         nav   = _compute_nav(state, prices)
         state["nav_history"].append({
             "date": str(datetime.now(timezone.utc)),
-            "nav":  round(nav, 2), "event": "stop_tp",
+            "nav":  round(nav, 2), "event": "hard_stop",
         })
         _save_state(state)
 
 
 def signal_rebalance_job():
-    """Recompute MacroRegime signals and rebalance if weight delta exceeds threshold."""
+    """Recompute macro signal and rebalance if weight delta exceeds threshold."""
     logger.info("-" * 55)
     logger.info(f"Macro signal recompute — {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}")
 
     try:
-        universe_data = get_universe_ohlcv(use_cache=False)
-        close   = build_close_matrix(universe_data)
-        returns = build_return_matrix(close)
-        high_df = pd.DataFrame({s: universe_data[s]["high"] for s in universe_data})
-        low_df  = pd.DataFrame({s: universe_data[s]["low"]  for s in universe_data})
+        data    = fetch_all(use_cache=False)
+        close   = _close_matrix(data)
+        returns = _ret_matrix(close)
     except Exception as e:
         logger.error(f"Data fetch failed — skipping: {e}")
         return
 
-    strategy = MacroRegimeStrategy()
-    signals  = strategy.run(close=close, returns=returns,
-                             high=high_df, low=low_df)
-    sig_row  = signals.iloc[-1].reindex(UNIVERSE, fill_value=0)
+    composite = compute_composite(close)
+    last_comp = float(composite.iloc[-1])
+    scale     = float(((last_comp + 1.0) / 2.0))
+    scale     = max(0.0, min(1.0, scale))
+    logger.info(f"Composite: {last_comp:.3f}  →  scale: {scale:.3f}")
 
-    cov = (
-        returns.iloc[-RISK_LOOKBACK_DAYS:]
-        .cov() * TRADING_DAYS
-    )
-    portfolio   = MaxSharpePortfolio()
-    new_weights = pd.Series(
-        portfolio.compute_weights(sig_row, cov, long_short=False)
-    ).reindex(UNIVERSE, fill_value=0)
-    new_weights = _signal_to_weights(sig_row)  # cap + top-N filter
+    tradeable  = [s for s in TRADE_UNIVERSE if s in close.columns]
+    ret_window = returns[tradeable].iloc[-RISK_LOOKBACK_DAYS:]
+
+    if scale < 0.05:
+        target_w = {s: 0.0 for s in tradeable}
+        logger.info("Risk-off: targeting full cash (composite ≤ -0.9)")
+    else:
+        base_w   = risk_parity_weights(ret_window, tradeable)
+        target_w = (base_w * scale).to_dict()
 
     state  = _load_state()
-    prices = _fetch_prices()
+    prices = _fetch_live_prices()
     nav    = _compute_nav(state, prices)
 
-    prev_w = pd.Series({
-        sym: (state["positions"].get(sym, 0) * prices.get(sym, 0)) / nav
-        for sym in UNIVERSE
-    }, dtype=float).fillna(0)
+    if nav <= 0:
+        logger.warning("NAV is zero — skipping rebalance")
+        return
 
-    delta = (new_weights - prev_w).abs().sum()
+    prev_w = {
+        sym: (state["positions"].get(sym, 0) * prices.get(sym, 0)) / nav
+        for sym in tradeable
+    }
+
+    delta = sum(abs(target_w.get(s, 0) - prev_w.get(s, 0)) for s in tradeable)
     logger.info(f"Weight delta: {delta:.4f}  (threshold={REBALANCE_THRESHOLD})")
 
     if delta < REBALANCE_THRESHOLD:
         logger.info("Signal unchanged — holding.")
         return
 
-    state = _execute_rebalance(new_weights, state, nav, prices)
-    state["current_weights"] = new_weights.to_dict()
+    state = _execute_rebalance(target_w, state, nav, prices)
+    state["current_weights"] = target_w
     state["last_run"]        = str(datetime.now(timezone.utc))
     nav = _compute_nav(state, prices)
     state["nav_history"].append({
@@ -450,46 +674,47 @@ def signal_rebalance_job():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LIVE  —  start scheduler
+# LIVE ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_live(run_now: bool = False):
-    mode = "PAPER" if PAPER_TRADING else "LIVE ⚠️"
+    mode = "PAPER" if PAPER else "LIVE ⚠️"
     logger.info("=" * 60)
-    logger.info(f"MACRO REGIME TRADER — LIVE ENGINE [{mode}]")
-    logger.info(f"  Price monitor : every {PRICE_MONITOR_SECS}s")
-    logger.info(f"  Rebalance     : 09:35 ET + 15:50 ET, Mon–Fri")
-    logger.info(f"  State file    : {STATE_FILE}")
+    logger.info(f"MACRO REGIME TRADER v2 — LIVE ENGINE [{mode}]")
+    logger.info(f"  Trade universe   : {len(TRADE_UNIVERSE)} names")
+    logger.info(f"  Signal universe  : {len(SIGNAL_UNIVERSE)} stocks (no ETFs)")
+    logger.info(f"  Portfolio        : risk parity (inverse vol, cap {MAX_POSITION_SIZE:.0%})")
+    logger.info(f"  Hard stop        : {HARD_STOP_PCT:.0%}  |  Trailing stop: disabled")
+    logger.info(f"  Price monitor    : every {PRICE_MONITOR_SECS}s")
+    logger.info(f"  Rebalance        : 09:35 ET + 15:50 ET, Mon–Fri")
+    logger.info(f"  State file       : {STATE_FILE}")
     logger.info("=" * 60)
 
-    # Check connectivity using MR-specific keys
     try:
-        acct = _get_mr_trading_client().get_account()
+        acct = _trading_client().get_account()
         logger.info(f"Alpaca (MR paper) connected — equity=${float(acct.equity):,.2f}")
     except Exception as e:
-        logger.error(f"Alpaca (MR paper) connection failed: {e}")
+        logger.error(f"Alpaca connection failed: {e}")
         sys.exit(1)
 
     scheduler = BackgroundScheduler(timezone="UTC")
-
     scheduler.add_job(
         func=price_monitor_job, trigger="interval",
-        seconds=PRICE_MONITOR_SECS, id="macro_price_monitor",
+        seconds=PRICE_MONITOR_SECS, id="mr_price_monitor",
         max_instances=1, coalesce=True,
     )
     scheduler.add_job(
         func=signal_rebalance_job, trigger="cron",
         day_of_week="mon-fri", hour=9, minute=35,
-        timezone="America/New_York", id="macro_signal_open",
+        timezone="America/New_York", id="mr_signal_open",
         max_instances=1, coalesce=True,
     )
     scheduler.add_job(
         func=signal_rebalance_job, trigger="cron",
         day_of_week="mon-fri", hour=15, minute=50,
-        timezone="America/New_York", id="macro_signal_close",
+        timezone="America/New_York", id="mr_signal_close",
         max_instances=1, coalesce=True,
     )
-
     scheduler.start()
 
     if run_now:
@@ -508,24 +733,32 @@ def run_live(run_now: bool = False):
 # ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _setup_logger():
+    logger.remove()
+    logger.add(
+        sys.stderr, level="INFO",
+        format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
+    )
+    logger.add(
+        LOG_FILE, level="DEBUG", rotation="1 week",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {message}",
+    )
+
+
 def main():
     _setup_logger()
-
-    parser = argparse.ArgumentParser(description="Macro Regime Standalone Trader")
+    parser = argparse.ArgumentParser(description="Macro Regime Standalone Trader v2")
     parser.add_argument(
         "--mode", choices=["backtest", "live", "full"], default="backtest",
         help=(
             "backtest — run backtest and print results. "
             "live     — start live engine immediately. "
-            "full     — run backtest first; if Sharpe ≥ 0.5 proceed to live."
+            "full     — run backtest first; if Sharpe ≥ min-sharpe proceed to live."
         ),
     )
-    parser.add_argument("--no-cache", action="store_true",
-                        help="Force re-download of market data")
-    parser.add_argument("--run-now", action="store_true",
-                        help="Fire one rebalance immediately on live start")
-    parser.add_argument("--min-sharpe", type=float, default=0.5,
-                        help="Minimum backtest Sharpe to proceed to live in full mode")
+    parser.add_argument("--no-cache",   action="store_true", help="Force re-download of market data")
+    parser.add_argument("--run-now",    action="store_true", help="Fire one rebalance immediately on live start")
+    parser.add_argument("--min-sharpe", type=float, default=0.5, help="Minimum backtest Sharpe to proceed to live")
     args = parser.parse_args()
 
     if args.mode == "backtest":
