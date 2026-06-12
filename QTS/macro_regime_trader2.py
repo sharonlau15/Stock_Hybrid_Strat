@@ -90,11 +90,14 @@ for _d in [DATA_DIR, LOG_DIR, RESULT_DIR]:
 
 # ── Universes ─────────────────────────────────────────────────────────────────
 
-# Tickers we actually trade (12 liquid names including ETFs as hedges)
+# 10 individual stocks only — SPY/QQQ excluded.
+# Risk parity assigns them the highest weights (lowest vol → highest 1/vol)
+# while they hold the same AAPL/MSFT/NVDA already in the book, creating
+# silent double-exposure that risk parity cannot see look-through.
+# SPY is kept as MARKET_PROXY for signal computation but not traded.
 TRADE_UNIVERSE = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
     "META", "JPM",  "JNJ",   "XOM",  "UNH",
-    "SPY",  "QQQ",
 ]
 
 # Broader cross-section used ONLY for computing breadth and cross-momentum.
@@ -123,8 +126,8 @@ SIGNAL_UNIVERSE = [
 
 MARKET_PROXY = "SPY"   # used for VIX proxy, trend MA, vol regime
 
-# All symbols to fetch (union of trade + signal, deduplicated)
-ALL_SYMBOLS = sorted(set(TRADE_UNIVERSE) | set(SIGNAL_UNIVERSE))
+# All symbols to fetch (union of trade + signal + market proxy, deduplicated)
+ALL_SYMBOLS = sorted(set(TRADE_UNIVERSE) | set(SIGNAL_UNIVERSE) | {MARKET_PROXY})
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 BACKTEST_START     = "2022-01-01"
@@ -382,6 +385,13 @@ def risk_parity_weights(ret_window: pd.DataFrame, symbols: list) -> pd.Series:
         under     = ~over
         if under.any() and w[under].sum() > 0:
             w[under] = w[under] / w[under].sum() * remaining
+
+    total = w.sum()
+    if total > 1e-9:
+        w = w / total
+    else:
+        logger.warning("risk_parity_weights: all weights zero — returning equal weight")
+        w[:] = 1.0 / len(avail)
 
     return w.reindex(symbols, fill_value=0.0)
 
@@ -871,16 +881,22 @@ def signal_rebalance_job():
     tradeable  = [s for s in TRADE_UNIVERSE if s in close.columns]
     ret_window = returns[tradeable].iloc[-RISK_LOOKBACK_DAYS:]
 
+    state  = _load_state()
+    prices = _fetch_live_prices()
+
+    missing_prices = [s for s in tradeable if s not in prices]
+    if missing_prices:
+        logger.error(f"Price fetch incomplete — missing {missing_prices}. Skipping rebalance.")
+        return
+
+    nav = _compute_nav(state, prices)
+
     if scale < 0.05:
         target_w = {s: 0.0 for s in tradeable}
         logger.info("Risk-off: targeting full cash (composite ≤ -0.9)")
     else:
         base_w   = risk_parity_weights(ret_window, tradeable)
         target_w = (base_w * scale).to_dict()
-
-    state  = _load_state()
-    prices = _fetch_live_prices()
-    nav    = _compute_nav(state, prices)
 
     if nav <= 0:
         logger.warning("NAV is zero — skipping rebalance")
