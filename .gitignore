@@ -2,7 +2,8 @@ Alpaca.env
 .env
 __pycache__/
 *.pyc
-data/cache/
+**/data/cache/
+**/data/mr_cache/
 logs/
 results/
 .DS_Store
