@@ -106,7 +106,12 @@ except ImportError:
 
 ROOT_DIR = Path(__file__).resolve().parent
 
-for _env in [ROOT_DIR / "Alpaca.env", ROOT_DIR / ".env"]:
+for _env in [
+    ROOT_DIR / "Alpaca.env",
+    ROOT_DIR / ".env",
+    ROOT_DIR.parent / "Alpaca.env",   # env file lives one level up
+    ROOT_DIR.parent / ".env",
+]:
     if _env.exists():
         load_dotenv(_env)
         break
