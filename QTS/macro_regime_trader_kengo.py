@@ -122,13 +122,14 @@ API_KEY    = os.getenv("ALPACA_PAPER_API_KEY_MRKENGO")
 API_SECRET = os.getenv("ALPACA_PAPER_API_SECRET_MRKENGO")
 PAPER      = True
 
-# Paths — own cache directory so it doesn't collide with the main engine
-DATA_DIR   = ROOT_DIR / "data" / "mr_cache"
+# Paths — kengo-specific filenames to avoid clashing with macro_regime_trader2.py
+# which runs from the same QTS/ directory and would otherwise share state + log.
+DATA_DIR        = ROOT_DIR / "data" / "kengo_cache"
 SOURCE_DATA_DIR = ROOT_DIR / "data" / "source_csv"
-LOG_DIR    = ROOT_DIR / "logs"
-RESULT_DIR = ROOT_DIR / "results"
-STATE_FILE = RESULT_DIR / "macro_live_state.json"
-LOG_FILE   = LOG_DIR   / "macro_engine.log"
+LOG_DIR         = ROOT_DIR / "logs"
+RESULT_DIR      = ROOT_DIR / "results"
+STATE_FILE      = RESULT_DIR / "kengo_live_state.json"
+LOG_FILE        = LOG_DIR   / "kengo_engine.log"
 
 LEGACY_CLASS_DATA_DIR = Path(
     r"C:\Users\kutsu\OneDrive\デスクトップ\KENGO\SMU\Class\QF-621Quantitative Trading Strategies\Apr-18"
