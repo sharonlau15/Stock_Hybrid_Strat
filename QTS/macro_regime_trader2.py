@@ -863,7 +863,16 @@ def signal_rebalance_job():
     """Recompute macro signal and rebalance if weight delta exceeds threshold."""
     logger.info("-" * 55)
     logger.info(f"Macro signal recompute — {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}")
+    try:
+        _signal_rebalance_job_inner()
+    except Exception as e:
+        # APScheduler swallows unhandled exceptions into its own logger (not loguru),
+        # so crashes would disappear silently. Catch everything here to ensure errors
+        # always appear in macro_engine.log.
+        logger.exception(f"signal_rebalance_job crashed: {e}")
 
+
+def _signal_rebalance_job_inner():
     try:
         data    = fetch_all(use_cache=False)
         close   = _close_matrix(data)
